@@ -1,0 +1,12 @@
+name: PO Agent Resume
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+jobs:
+  resume:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: vyzn-tech/po-agent/resume@v1
+        with:
+          github_token: ${{ github.token }}

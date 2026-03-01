@@ -1,0 +1,549 @@
+name: 'PO Agent'
+description: 'AI-powered Product Owner agent. Triggered from GitHub PRs, Slack, or any webhook source.'
+branding:
+  icon: 'cpu'
+  color: 'orange'
+
+inputs:
+  anthropic_api_key:
+    description: 'Anthropic API key'
+    required: true
+  max_budget_usd:
+    description: 'Max spend per session in USD'
+    default: '5.0'
+  model:
+    description: 'Claude model to use'
+    default: 'claude-sonnet-4-20250514'
+  trigger_word:
+    description: 'The trigger word that invokes the agent (e.g. @po-agent)'
+    default: '@po-agent'
+  secrets:
+    description: 'Newline-separated KEY=VALUE pairs. Made available as env vars to the agent and skills.'
+    default: ''
+  github_token:
+    description: 'GitHub token for posting comments and reactions. Defaults to github.token.'
+    default: ${{ github.token }}
+
+outputs:
+  response:
+    description: 'The agent response text'
+    value: ${{ steps.run-agent.outputs.response }}
+  cost_usd:
+    description: 'Session cost in USD'
+    value: ${{ steps.run-agent.outputs.cost_usd }}
+
+runs:
+  using: 'composite'
+  steps:
+    # ── 1. Detect source from GitHub event payload ──────────────────────
+    - name: Detect source and extract context
+      id: source
+      shell: bash
+      env:
+        TRIGGER_WORD: ${{ inputs.trigger_word }}
+      run: |
+        EVENT=$(cat "$GITHUB_EVENT_PATH")
+
+        case "$GITHUB_EVENT_NAME" in
+          issue_comment)
+            BODY=$(echo "$EVENT" | jq -r '.comment.body')
+            # Strip trigger word from message
+            MESSAGE=$(echo "$BODY" | sed "s|$TRIGGER_WORD||g" | xargs)
+            echo "source=github" >> "$GITHUB_OUTPUT"
+            echo "message=$MESSAGE" >> "$GITHUB_OUTPUT"
+            echo "pr_number=$(echo "$EVENT" | jq -r '.issue.number')" >> "$GITHUB_OUTPUT"
+            echo "comment_id=$(echo "$EVENT" | jq -r '.comment.id')" >> "$GITHUB_OUTPUT"
+            echo "comment_user=$(echo "$EVENT" | jq -r '.comment.user.login')" >> "$GITHUB_OUTPUT"
+            ;;
+          repository_dispatch)
+            ACTION=$(echo "$EVENT" | jq -r '.action')
+            PAYLOAD=$(echo "$EVENT" | jq -r '.client_payload')
+            echo "dispatch_action=$ACTION" >> "$GITHUB_OUTPUT"
+
+            # Check for resume event
+            if echo "$PAYLOAD" | jq -e '.pr_number and .trigger_result' > /dev/null 2>&1; then
+              echo "source=resume" >> "$GITHUB_OUTPUT"
+              echo "pr_number=$(echo "$PAYLOAD" | jq -r '.pr_number')" >> "$GITHUB_OUTPUT"
+              echo "resume_trigger=$(echo "$PAYLOAD" | jq -r '.trigger_workflow // "unknown"')" >> "$GITHUB_OUTPUT"
+              echo "resume_result=$(echo "$PAYLOAD" | jq -r '.trigger_result')" >> "$GITHUB_OUTPUT"
+              echo "resume_attempt=$(echo "$PAYLOAD" | jq -r '.attempt // 1')" >> "$GITHUB_OUTPUT"
+              echo "resume_workflow_summary=$(echo "$PAYLOAD" | jq -r '.workflow_summary // ""')" >> "$GITHUB_OUTPUT"
+              echo "message=Resume: $(echo "$PAYLOAD" | jq -r '.trigger_workflow // "workflow"') completed ($(echo "$PAYLOAD" | jq -r '.trigger_result'))" >> "$GITHUB_OUTPUT"
+              # Pass through any extra fields from payload as env vars
+              echo "$PAYLOAD" | jq -r 'to_entries[] | select(.key | test("^(pr_number|trigger_workflow|trigger_result|attempt|workflow_summary)$") | not) | "\(.key)=\(.value)"' >> "$GITHUB_OUTPUT" 2>/dev/null || true
+
+            # Check for Slack-like event (has text + channel_id)
+            elif echo "$PAYLOAD" | jq -e '.text and .channel_id' > /dev/null 2>&1; then
+              echo "source=slack" >> "$GITHUB_OUTPUT"
+              echo "message=$(echo "$PAYLOAD" | jq -r '.text')" >> "$GITHUB_OUTPUT"
+              echo "slack_channel=$(echo "$PAYLOAD" | jq -r '.channel_id')" >> "$GITHUB_OUTPUT"
+              echo "slack_thread_ts=$(echo "$PAYLOAD" | jq -r '.thread_ts // .message_ts // ""')" >> "$GITHUB_OUTPUT"
+              echo "slack_message_ts=$(echo "$PAYLOAD" | jq -r '.message_ts // ""')" >> "$GITHUB_OUTPUT"
+              # Skip bot messages
+              if echo "$PAYLOAD" | jq -e '.bot_id' > /dev/null 2>&1; then
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+              fi
+            # Generic webhook event — extract message from common fields
+            else
+              echo "source=webhook" >> "$GITHUB_OUTPUT"
+              MSG=$(echo "$PAYLOAD" | jq -r '.message // .comment_text // .text // .body // "No message"')
+              echo "message=$MSG" >> "$GITHUB_OUTPUT"
+              # Pass all payload fields as outputs
+              echo "$PAYLOAD" | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "$GITHUB_OUTPUT" 2>/dev/null || true
+            fi
+            ;;
+          workflow_dispatch)
+            echo "source=manual" >> "$GITHUB_OUTPUT"
+            echo "message=$(echo "$EVENT" | jq -r '.inputs.message // "Hello"')" >> "$GITHUB_OUTPUT"
+            ;;
+          *)
+            echo "source=unknown" >> "$GITHUB_OUTPUT"
+            echo "message=Triggered by $GITHUB_EVENT_NAME" >> "$GITHUB_OUTPUT"
+            ;;
+        esac
+
+    - name: Early exit for bot messages
+      if: steps.source.outputs.skip == 'true'
+      shell: bash
+      run: |
+        echo "::notice::Skipping — bot message detected (prevents infinite loops)"
+        exit 0
+
+    # ── 2. Acknowledge receipt ──────────────────────────────────────────
+    - name: Acknowledge on GitHub
+      if: steps.source.outputs.source == 'github' && steps.source.outputs.skip != 'true'
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.github_token }}
+        script: |
+          await github.rest.reactions.createForIssueComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            comment_id: ${{ steps.source.outputs.comment_id }},
+            content: 'eyes'
+          });
+
+    # ── 3. Install Claude Code CLI ──────────────────────────────────────
+    - name: Install Claude Code
+      if: steps.source.outputs.skip != 'true'
+      id: install
+      shell: bash
+      run: |
+        if command -v claude &> /dev/null; then
+          echo "Claude Code already installed: $(claude --version)"
+        else
+          curl -fsSL https://claude.ai/install.sh | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        fi
+        export PATH="$HOME/.local/bin:$PATH"
+        CLAUDE_PATH="$(which claude)"
+        echo "claude_path=$CLAUDE_PATH" >> "$GITHUB_OUTPUT"
+        "$CLAUDE_PATH" --version
+
+    # ── 4. Setup Node.js and Playwright ─────────────────────────────────
+    - name: Setup Node.js
+      if: steps.source.outputs.skip != 'true'
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Playwright
+      if: steps.source.outputs.skip != 'true'
+      shell: bash
+      run: |
+        npx -y playwright install chromium --with-deps 2>/dev/null || {
+          npx -y playwright install chromium
+          sudo npx -y playwright install-deps chromium 2>/dev/null || true
+        }
+
+    # ── 5. Register MCP servers ─────────────────────────────────────────
+    - name: Register MCP servers
+      if: steps.source.outputs.skip != 'true'
+      shell: bash
+      env:
+        CLAUDE_PATH: ${{ steps.install.outputs.claude_path }}
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        export PATH="$HOME/.local/bin:$PATH"
+
+        "$CLAUDE_PATH" mcp add github \
+          --scope user \
+          -e GITHUB_PERSONAL_ACCESS_TOKEN="$GH_TOKEN" \
+          -- npx -y @modelcontextprotocol/server-github || true
+
+        "$CLAUDE_PATH" mcp add playwright \
+          --scope user \
+          -- npx -y @playwright/mcp@latest \
+            --headless \
+            --ignore-https-errors \
+            --viewport-size=1920x1080 \
+            --save-trace \
+            --output-dir=/tmp/playwright-artifacts || true
+
+        "$CLAUDE_PATH" mcp list || true
+
+    # ── 6. Link skills and scripts ──────────────────────────────────────
+    - name: Setup skills and scripts
+      if: steps.source.outputs.skip != 'true'
+      shell: bash
+      run: |
+        ACTION_DIR="${{ github.action_path }}"
+        WORKSPACE="$GITHUB_WORKSPACE"
+        mkdir -p "$WORKSPACE/.claude/skills"
+
+        echo "=== Linking PO Agent skills ==="
+
+        # Link framework default skills (skip if consumer has override in .po-agent/skills/)
+        if [ -d "$ACTION_DIR/skills" ]; then
+          for skill_dir in "$ACTION_DIR"/skills/*/; do
+            [ ! -d "$skill_dir" ] && continue
+            skill_name=$(basename "$skill_dir")
+            if [ -d "$WORKSPACE/.po-agent/skills/$skill_name" ]; then
+              echo "SKIP (override): $skill_name"
+            else
+              ln -sf "$skill_dir" "$WORKSPACE/.claude/skills/$skill_name"
+              echo "LINK (framework): $skill_name"
+            fi
+          done
+        fi
+
+        # Link consumer skills from .po-agent/skills/
+        if [ -d "$WORKSPACE/.po-agent/skills" ]; then
+          for skill_dir in "$WORKSPACE"/.po-agent/skills/*/; do
+            [ ! -d "$skill_dir" ] && continue
+            skill_name=$(basename "$skill_dir")
+            ln -sf "$skill_dir" "$WORKSPACE/.claude/skills/$skill_name"
+            echo "LINK (consumer):  $skill_name"
+          done
+        fi
+
+        echo ""
+        echo "=== Active skills ==="
+        ls "$WORKSPACE/.claude/skills/" 2>/dev/null || echo "(none)"
+
+        # Link scripts to PATH
+        if [ -d "$ACTION_DIR/scripts" ]; then
+          for script in "$ACTION_DIR"/scripts/*.sh; do
+            [ ! -f "$script" ] && continue
+            chmod +x "$script"
+            name=$(basename "$script" .sh)
+            sudo ln -sf "$script" "/usr/local/bin/$name"
+            echo "SCRIPT: $name"
+          done
+        fi
+
+    # ── 7. Export secrets as environment variables ──────────────────────
+    - name: Export secrets
+      if: steps.source.outputs.skip != 'true'
+      shell: bash
+      env:
+        SECRETS_INPUT: ${{ inputs.secrets }}
+      run: |
+        if [ -n "$SECRETS_INPUT" ]; then
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            [[ "$line" == \#* ]] && continue
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "$SECRETS_INPUT"
+          echo "Exported secrets to environment"
+        fi
+
+    # ── 8. Fetch context ────────────────────────────────────────────────
+    - name: Fetch context
+      if: steps.source.outputs.skip != 'true'
+      id: context
+      shell: bash
+      env:
+        SOURCE: ${{ steps.source.outputs.source }}
+        PR_NUMBER: ${{ steps.source.outputs.pr_number }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        SLACK_BOT_TOKEN_ENV: ${{ steps.source.outputs.slack_bot_token }}
+        SLACK_CHANNEL: ${{ steps.source.outputs.slack_channel }}
+        SLACK_THREAD_TS: ${{ steps.source.outputs.slack_thread_ts }}
+      run: |
+        CONTEXT_FILE="/tmp/conversation_context.txt"
+        touch "$CONTEXT_FILE"
+
+        case "$SOURCE" in
+          github|resume)
+            if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
+              echo "=== Pull Request #$PR_NUMBER ===" > "$CONTEXT_FILE"
+              PR_DATA=$(gh pr view "$PR_NUMBER" --json title,body,headRefName,baseRefName,files,comments 2>/dev/null || echo "{}")
+              if [ "$PR_DATA" != "{}" ]; then
+                echo "**Title:** $(echo "$PR_DATA" | jq -r '.title // "N/A"')" >> "$CONTEXT_FILE"
+                echo "**Branch:** $(echo "$PR_DATA" | jq -r '.headRefName // "?"') → $(echo "$PR_DATA" | jq -r '.baseRefName // "?"')" >> "$CONTEXT_FILE"
+                echo "" >> "$CONTEXT_FILE"
+                echo "**Description:**" >> "$CONTEXT_FILE"
+                echo "$PR_DATA" | jq -r '.body // "No description"' >> "$CONTEXT_FILE"
+                echo "" >> "$CONTEXT_FILE"
+                echo "**Changed Files:**" >> "$CONTEXT_FILE"
+                echo "$PR_DATA" | jq -r '.files[].path' 2>/dev/null | head -20 >> "$CONTEXT_FILE"
+                echo "" >> "$CONTEXT_FILE"
+                echo "**Recent Comments:**" >> "$CONTEXT_FILE"
+                echo "$PR_DATA" | jq -r '.comments[-5:]? // [] | .[]? | "- \(.author.login // "unknown"): \(.body | split("\n")[0] // "")"' >> "$CONTEXT_FILE" 2>/dev/null || true
+              fi
+            fi
+            ;;
+          slack)
+            # Fetch thread history if Slack bot token is available
+            if [ -n "$SLACK_BOT_TOKEN" ] && [ -n "$SLACK_THREAD_TS" ]; then
+              RESPONSE=$(curl -s "https://slack.com/api/conversations.replies" \
+                -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+                -G \
+                --data-urlencode "channel=$SLACK_CHANNEL" \
+                --data-urlencode "ts=$SLACK_THREAD_TS" \
+                --data-urlencode "limit=20" 2>/dev/null)
+
+              if echo "$RESPONSE" | jq -e '.ok == true' > /dev/null 2>&1; then
+                echo "=== Slack Thread History ===" > "$CONTEXT_FILE"
+                echo "$RESPONSE" | jq -r '
+                  .messages |
+                  to_entries |
+                  map(
+                    if .value.bot_id then "Assistant: " + .value.text
+                    else "User: " + .value.text end
+                  ) | join("\n\n")
+                ' >> "$CONTEXT_FILE"
+              fi
+            fi
+            ;;
+        esac
+
+        # Add resume context
+        if [ "$SOURCE" == "resume" ]; then
+          echo "" >> "$CONTEXT_FILE"
+          echo "=== RESUME CONTEXT ===" >> "$CONTEXT_FILE"
+          echo "You are **resuming** work on PR #$PR_NUMBER." >> "$CONTEXT_FILE"
+          echo "Trigger: ${{ steps.source.outputs.resume_trigger }} — Result: **${{ steps.source.outputs.resume_result }}**" >> "$CONTEXT_FILE"
+          SUMMARY="${{ steps.source.outputs.resume_workflow_summary }}"
+          [ -n "$SUMMARY" ] && echo "Workflow results: $SUMMARY" >> "$CONTEXT_FILE"
+          echo "Attempt ${{ steps.source.outputs.resume_attempt }}." >> "$CONTEXT_FILE"
+          echo "=== END RESUME CONTEXT ===" >> "$CONTEXT_FILE"
+        fi
+
+        if [ -s "$CONTEXT_FILE" ]; then
+          echo "has_context=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    # ── 9. Compose prompt and run agent ─────────────────────────────────
+    - name: Run PO Agent
+      if: steps.source.outputs.skip != 'true'
+      id: run-agent
+      shell: bash
+      env:
+        CLAUDE_PATH: ${{ steps.install.outputs.claude_path }}
+        ANTHROPIC_API_KEY: ${{ inputs.anthropic_api_key }}
+        ANTHROPIC_MODEL: ${{ inputs.model }}
+        MAX_BUDGET: ${{ inputs.max_budget_usd }}
+        SOURCE: ${{ steps.source.outputs.source }}
+        USER_MESSAGE: ${{ steps.source.outputs.message }}
+      run: |
+        export PATH="$HOME/.local/bin:$PATH"
+        ACTION_DIR="${{ github.action_path }}"
+
+        # Build system prompt
+        cp "$ACTION_DIR/prompts/core.md" /tmp/prompt.txt
+
+        # Add source-specific prompt
+        SOURCE_PROMPT="$ACTION_DIR/prompts/source-${SOURCE}.md"
+        if [ -f "$SOURCE_PROMPT" ]; then
+          echo "" >> /tmp/prompt.txt
+          echo "---" >> /tmp/prompt.txt
+          echo "" >> /tmp/prompt.txt
+          cat "$SOURCE_PROMPT" >> /tmp/prompt.txt
+        fi
+
+        # Add context
+        if [ -f /tmp/conversation_context.txt ] && [ -s /tmp/conversation_context.txt ]; then
+          echo "" >> /tmp/prompt.txt
+          echo "=== Context ===" >> /tmp/prompt.txt
+          cat /tmp/conversation_context.txt >> /tmp/prompt.txt
+          echo "" >> /tmp/prompt.txt
+          echo "=== End of context ===" >> /tmp/prompt.txt
+        fi
+
+        # Add user message
+        echo "" >> /tmp/prompt.txt
+        echo "User message:" >> /tmp/prompt.txt
+        echo "$USER_MESSAGE" >> /tmp/prompt.txt
+
+        # Create artifacts directory
+        mkdir -p /tmp/agent-artifacts/{screenshots,transcripts}
+
+        # Run Claude Code
+        echo "=== Running PO Agent (source: $SOURCE, budget: \$$MAX_BUDGET) ==="
+
+        "$CLAUDE_PATH" --print \
+          --verbose \
+          --dangerously-skip-permissions \
+          --max-budget-usd "$MAX_BUDGET" \
+          --output-format stream-json \
+          "$(cat /tmp/prompt.txt)" 2>&1 | tee /tmp/agent-artifacts/transcripts/transcript.jsonl || true
+
+        # Extract result from stream-json
+        RESULT_LINE=$(grep '"type":"result"' /tmp/agent-artifacts/transcripts/transcript.jsonl 2>/dev/null | tail -1)
+
+        if [ -n "$RESULT_LINE" ]; then
+          echo "$RESULT_LINE" > /tmp/agent_raw.json
+
+          SUBTYPE=$(echo "$RESULT_LINE" | jq -r '.subtype // ""')
+          COST_USD=$(echo "$RESULT_LINE" | jq -r '.total_cost_usd // 0')
+
+          if [ "$SUBTYPE" == "error_max_budget_usd" ]; then
+            NUM_TURNS=$(echo "$RESULT_LINE" | jq -r '.num_turns // 0')
+            printf "⚠️ **Budget Limit Reached** (\$%s USD, %s turns)\n\nThe agent was working but hit the budget limit before completing." "$COST_USD" "$NUM_TURNS" > /tmp/agent_output.txt
+          else
+            echo "$RESULT_LINE" | jq -r '.result // ""' > /tmp/agent_output.txt
+
+            # Handle empty result — attempt session resume
+            RESULT_LEN=$(wc -c < /tmp/agent_output.txt | tr -d ' ')
+            if [ "$RESULT_LEN" -lt 10 ]; then
+              SESSION_ID=$(echo "$RESULT_LINE" | jq -r '.session_id // ""')
+              if [ -n "$SESSION_ID" ] && [ "$SESSION_ID" != "null" ]; then
+                echo "::warning::Empty result — resuming session $SESSION_ID"
+                "$CLAUDE_PATH" --print \
+                  --verbose \
+                  --dangerously-skip-permissions \
+                  --max-budget-usd 3.0 \
+                  --output-format stream-json \
+                  --resume "$SESSION_ID" \
+                  "The previous response was empty. Please provide your response." \
+                  2>&1 | tee -a /tmp/agent-artifacts/transcripts/transcript.jsonl || true
+
+                RESUME_RESULT=$(grep '"type":"result"' /tmp/agent-artifacts/transcripts/transcript.jsonl | tail -1)
+                if [ -n "$RESUME_RESULT" ]; then
+                  RESUME_TEXT=$(echo "$RESUME_RESULT" | jq -r '.result // ""')
+                  RESUME_COST=$(echo "$RESUME_RESULT" | jq -r '.total_cost_usd // 0')
+                  if [ ${#RESUME_TEXT} -ge 10 ]; then
+                    echo "$RESUME_TEXT" > /tmp/agent_output.txt
+                    COST_USD=$(awk "BEGIN {printf \"%.4f\", $COST_USD + $RESUME_COST}")
+                  fi
+                fi
+              fi
+            fi
+          fi
+
+          echo "cost_usd=$COST_USD" >> "$GITHUB_OUTPUT"
+        else
+          echo "The agent did not produce a result. Check workflow logs." > /tmp/agent_output.txt
+        fi
+
+        # Store response for output
+        RESPONSE=$(cat /tmp/agent_output.txt 2>/dev/null || echo "No output")
+        echo "response<<RESPONSE_EOF" >> "$GITHUB_OUTPUT"
+        echo "$RESPONSE" >> "$GITHUB_OUTPUT"
+        echo "RESPONSE_EOF" >> "$GITHUB_OUTPUT"
+
+    # ── 10. Finalize Playwright ─────────────────────────────────────────
+    - name: Finalize Playwright recordings
+      if: always() && steps.source.outputs.skip != 'true'
+      shell: bash
+      run: |
+        pkill -f "@playwright/mcp" 2>/dev/null || true
+        sleep 1
+
+    # ── 11. Upload artifacts ────────────────────────────────────────────
+    - name: Upload agent artifacts
+      if: always() && steps.source.outputs.skip != 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: po-agent-artifacts
+        path: |
+          /tmp/agent-artifacts/
+          /tmp/playwright-artifacts/
+        if-no-files-found: ignore
+        retention-days: 7
+
+    # ── 12. Post response ───────────────────────────────────────────────
+    - name: Post response to GitHub PR
+      if: always() && (steps.source.outputs.source == 'github' || steps.source.outputs.source == 'resume') && steps.source.outputs.skip != 'true'
+      uses: actions/github-script@v7
+      env:
+        COST_USD: ${{ steps.run-agent.outputs.cost_usd }}
+      with:
+        github-token: ${{ inputs.github_token }}
+        script: |
+          const fs = require('fs');
+          let response = '';
+          try {
+            response = fs.readFileSync('/tmp/agent_output.txt', 'utf8').slice(-10000);
+          } catch (e) {
+            response = 'The agent did not produce output. Check workflow logs.';
+          }
+
+          const costUsd = process.env.COST_USD;
+          const costLine = costUsd && costUsd !== '0' ? `\n_LLM Cost: ~${costUsd} USD_` : '';
+          const source = '${{ steps.source.outputs.source }}';
+          const prNumber = parseInt('${{ steps.source.outputs.pr_number }}');
+
+          if (!prNumber || isNaN(prNumber)) {
+            console.log('No PR number — skipping comment');
+            return;
+          }
+
+          // Add completion reaction to original comment
+          const commentId = parseInt('${{ steps.source.outputs.comment_id }}');
+          if (commentId && !isNaN(commentId) && source === 'github') {
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: commentId,
+              content: 'rocket'
+            }).catch(() => {});
+          }
+
+          const commentUser = '${{ steps.source.outputs.comment_user }}';
+          const mention = commentUser ? `@${commentUser}\n\n` : '';
+          const resumeLabel = source === 'resume'
+            ? `## 🔄 Resume (Attempt ${{ steps.source.outputs.resume_attempt }})\n\n`
+            : '';
+
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber,
+            body: `${resumeLabel}${mention}${response}\n\n---\n*🤖 [workflow run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*${costLine}`
+          });
+
+    - name: Post response to Slack
+      if: always() && steps.source.outputs.source == 'slack' && steps.source.outputs.skip != 'true'
+      shell: bash
+      env:
+        COST_USD: ${{ steps.run-agent.outputs.cost_usd }}
+        SLACK_CHANNEL: ${{ steps.source.outputs.slack_channel }}
+        SLACK_THREAD_TS: ${{ steps.source.outputs.slack_message_ts }}
+      run: |
+        # SLACK_BOT_TOKEN must be provided via secrets input
+        if [ -z "$SLACK_BOT_TOKEN" ]; then
+          echo "::warning::No SLACK_BOT_TOKEN — cannot post to Slack"
+          exit 0
+        fi
+
+        RESPONSE=$(cat /tmp/agent_output.txt 2>/dev/null | tail -c 3000 || echo "No output")
+
+        if [ -n "$COST_USD" ] && [ "$COST_USD" != "0" ]; then
+          RESPONSE=$(printf "%s\n\n---\n_LLM Cost: ~%s USD_" "$RESPONSE" "$COST_USD")
+        fi
+
+        RESPONSE_ESCAPED=$(printf '%s' "$RESPONSE" | jq -Rs .)
+
+        curl -s -X POST https://slack.com/api/chat.postMessage \
+          -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "{
+            \"channel\": \"$SLACK_CHANNEL\",
+            \"thread_ts\": \"$SLACK_THREAD_TS\",
+            \"text\": $RESPONSE_ESCAPED
+          }" | jq .ok
+
+        # Update reactions
+        if [ -n "$SLACK_THREAD_TS" ]; then
+          curl -s -X POST https://slack.com/api/reactions.remove \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"channel\":\"$SLACK_CHANNEL\",\"timestamp\":\"$SLACK_THREAD_TS\",\"name\":\"thinking_face\"}" > /dev/null 2>&1
+          curl -s -X POST https://slack.com/api/reactions.add \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"channel\":\"$SLACK_CHANNEL\",\"timestamp\":\"$SLACK_THREAD_TS\",\"name\":\"white_check_mark\"}" > /dev/null 2>&1
+        fi
