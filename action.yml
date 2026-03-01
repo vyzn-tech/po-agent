@@ -16,7 +16,7 @@ inputs:
     default: 'claude-sonnet-4-20250514'
   claude_cli_version:
     description: 'Claude Code CLI version to install (e.g. 1.0.16). Use "latest" for the newest release.'
-    default: '1.0.16'
+    default: 'latest'
   trigger_word:
     description: 'The trigger word that invokes the agent (e.g. @po-agent)'
     default: '@po-agent'
