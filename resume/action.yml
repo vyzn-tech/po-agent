@@ -14,6 +14,9 @@ inputs:
   optional_workflows:
     description: 'Comma-separated list of optional workflow names (only waited on if triggered)'
     default: ''
+  work_item_id:
+    description: 'Azure DevOps work item ID to pass through in the dispatch payload (for AzDo integration)'
+    default: ''
   secrets:
     description: 'Newline-separated KEY=VALUE pairs for integration-specific state tracking (passed to skills).'
     default: ''
@@ -40,6 +43,7 @@ runs:
         MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         REQUIRED_WORKFLOWS: ${{ inputs.required_workflows }}
         OPTIONAL_WORKFLOWS: ${{ inputs.optional_workflows }}
+        WORK_ITEM_ID: ${{ inputs.work_item_id }}
       with:
         github-token: ${{ inputs.github_token }}
         script: |
@@ -176,15 +180,30 @@ runs:
 
           // Dispatch resume event
           console.log(`Dispatching resume for PR #${pr.number} (attempt ${nextAttempt}, result: ${overallResult})`);
+          const payload = {
+            pr_number: pr.number,
+            trigger_workflow: workflowRun.name,
+            trigger_result: overallResult,
+            workflow_summary: summary,
+            attempt: nextAttempt
+          };
+
+          // Pass through work_item_id for AzDo integration
+          // Priority: explicit input > detected from PR title
+          let workItemId = process.env.WORK_ITEM_ID;
+          if (!workItemId) {
+            // Try to detect from PR title (VYZN-1234 or AB#1234)
+            const titleMatch = prData.title?.match(/(?:AB#|VYZN-)(\d+)/);
+            if (titleMatch) workItemId = titleMatch[1];
+          }
+          if (workItemId) {
+            payload.work_item_id = workItemId;
+            console.log(`Including work_item_id: ${workItemId}`);
+          }
+
           await github.rest.repos.createDispatchEvent({
             owner: context.repo.owner,
             repo: context.repo.repo,
             event_type: 'po-agent-resume',
-            client_payload: {
-              pr_number: pr.number,
-              trigger_workflow: workflowRun.name,
-              trigger_result: overallResult,
-              workflow_summary: summary,
-              attempt: nextAttempt
-            }
+            client_payload: payload
           });
