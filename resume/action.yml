@@ -76,7 +76,7 @@ runs:
 
           // Get attempt count from labels
           const attemptLabel = labels.find(l => l.startsWith('po-agent:attempt-'));
-          const currentAttempt = attemptLabel ? parseInt(attemptLabel.split('-')[1], 10) : 0;
+          const currentAttempt = attemptLabel ? parseInt(attemptLabel.replace('po-agent:attempt-', ''), 10) : 0;
           const maxAttempts = parseInt(process.env.MAX_ATTEMPTS || '10', 10);
 
           if (currentAttempt >= maxAttempts) {
