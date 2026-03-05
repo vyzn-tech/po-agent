@@ -23,9 +23,11 @@ The action reads `$GITHUB_EVENT_PATH` (the full event payload JSON) to detect th
 
 | Event | Source | How detected |
 |-------|--------|-------------|
-| `issue_comment` | `github` | Native GitHub event |
+| `issue_comment` (on PR) | `github` | Native GitHub event, `issue.pull_request` exists |
+| `issue_comment` (on issue) | `github-issue` | Native GitHub event, no `issue.pull_request` |
 | `repository_dispatch` with `text` + `channel_id` | `slack` | Slack webhook relay |
 | `repository_dispatch` with `pr_number` + `trigger_result` | `resume` | Resume workflow |
+| `repository_dispatch` with `work_item_id` + `comment_text` | `azure-devops` | AzDo webhook relay |
 | `repository_dispatch` (other) | `webhook` | Generic webhook |
 | `workflow_dispatch` | `manual` | Manual trigger |
 
@@ -85,3 +87,48 @@ prompts/source-*.md    ← Source-specific behavior
 context                ← PR details, thread history, resume info
 user message           ← The actual request
 ```
+
+## Concurrency & Queue Management
+
+To prevent multiple agent runs from conflicting with each other, use GitHub Actions concurrency groups:
+
+```yaml
+jobs:
+  agent:
+    concurrency:
+      group: po-agent-pr-${{ github.event.issue.number || github.event.client_payload.pr_number }}
+      cancel-in-progress: false  # Don't cancel running agents
+    runs-on: ubuntu-latest
+    # ...
+```
+
+### Recommended patterns:
+
+| Pattern | Concurrency Group | Use Case |
+|---------|------------------|----------|
+| One agent per PR | `po-agent-pr-${{ issue.number }}` | Default — prevents concurrent edits to same branch |
+| One agent per repo | `po-agent` | Strict — only one agent runs at a time |
+| Unlimited | (no concurrency) | Parallel — multiple agents can run simultaneously |
+
+### Rate Limiting
+
+- The Anthropic API has rate limits. If you see `429 Too Many Requests` errors, reduce `max_budget_usd` or add delays between triggers.
+- For high-traffic repos, consider using `cancel-in-progress: true` to avoid queuing many runs.
+- The resume system tracks attempts (up to `max_attempts`, default 10) to prevent infinite loops.
+
+## Inputs Reference
+
+| Input | Description | Default |
+|-------|-------------|---------|
+| `anthropic_api_key` | Anthropic API key (required) | — |
+| `max_budget_usd` | Max spend per session | `5.0` |
+| `model` | Claude model to use | `claude-sonnet-4-20250514` |
+| `anthropic_base_url` | Custom API base URL (for proxies) | — |
+| `timeout_minutes` | Timeout awareness for the agent | `0` (disabled) |
+| `dry_run` | Stop after investigation, no code changes | `false` |
+| `investigation_model` | Model for read-only tasks | — |
+| `implementation_model` | Model for code-writing tasks | — |
+| `trigger_word` | Keyword to invoke agent | `@po-agent` |
+| `secrets` | Newline-separated KEY=VALUE env vars | — |
+| `github_token` | GitHub token | `github.token` |
+| `claude_cli_version` | Claude Code CLI version | `latest` |

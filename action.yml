@@ -26,6 +26,21 @@ inputs:
   github_token:
     description: 'GitHub token for posting comments and reactions. Defaults to github.token.'
     default: ${{ github.token }}
+  anthropic_base_url:
+    description: 'Custom Anthropic API base URL (e.g. for proxies like copilot-api). Overrides ANTHROPIC_BASE_URL from secrets.'
+    default: ''
+  timeout_minutes:
+    description: 'Timeout in minutes for the Claude Code execution. Defaults to 0 (no explicit timeout, relies on GitHub Actions job timeout).'
+    default: '0'
+  dry_run:
+    description: 'If true, agent stops after investigation/scoping (Gate 3) without making changes.'
+    default: 'false'
+  investigation_model:
+    description: 'Model to use for investigation/analysis phases (overrides model for read-only tasks).'
+    default: ''
+  implementation_model:
+    description: 'Model to use for implementation phases (overrides model for code-writing tasks).'
+    default: ''
 
 outputs:
   response:
@@ -52,7 +67,12 @@ runs:
             BODY=$(echo "$EVENT" | jq -r '.comment.body')
             # Strip trigger word from message
             MESSAGE=$(echo "$BODY" | sed "s|$TRIGGER_WORD||g" | xargs)
-            echo "source=github" >> "$GITHUB_OUTPUT"
+            IS_PR=$(echo "$EVENT" | jq -r '.issue.pull_request // empty')
+            if [ -n "$IS_PR" ]; then
+              echo "source=github" >> "$GITHUB_OUTPUT"
+            else
+              echo "source=github-issue" >> "$GITHUB_OUTPUT"
+            fi
             echo "message=$MESSAGE" >> "$GITHUB_OUTPUT"
             echo "pr_number=$(echo "$EVENT" | jq -r '.issue.number')" >> "$GITHUB_OUTPUT"
             echo "comment_id=$(echo "$EVENT" | jq -r '.comment.id')" >> "$GITHUB_OUTPUT"
@@ -142,7 +162,7 @@ runs:
 
     # ── 3. Acknowledge receipt ──────────────────────────────────────────
     - name: Acknowledge on GitHub
-      if: steps.source.outputs.source == 'github' && steps.source.outputs.skip != 'true'
+      if: (steps.source.outputs.source == 'github' || steps.source.outputs.source == 'github-issue') && steps.source.outputs.skip != 'true'
       uses: actions/github-script@v7
       with:
         github-token: ${{ inputs.github_token }}
@@ -326,7 +346,36 @@ runs:
           echo "Registered Notion MCP server"
         fi
 
-        "$CLAUDE_PATH" mcp list || true
+        echo ""
+        echo "=== MCP Server Health Check ==="
+        MCP_LIST=$("$CLAUDE_PATH" mcp list 2>/dev/null || echo "")
+        echo "$MCP_LIST"
+
+        # Verify expected servers are registered
+        MCP_ERRORS=""
+        if ! echo "$MCP_LIST" | grep -qi "github"; then
+          MCP_ERRORS="${MCP_ERRORS}⚠️ GitHub MCP server not registered\n"
+        fi
+        if ! echo "$MCP_LIST" | grep -qi "playwright"; then
+          MCP_ERRORS="${MCP_ERRORS}⚠️ Playwright MCP server not registered\n"
+        fi
+        if [ -n "$AZURE_DEVOPS_PAT" ] && [ -n "$AZURE_DEVOPS_ORG" ]; then
+          if ! echo "$MCP_LIST" | grep -qi "azure"; then
+            MCP_ERRORS="${MCP_ERRORS}⚠️ Azure DevOps MCP server not registered (credentials provided but server missing)\n"
+          fi
+        fi
+        if [ -n "$NOTION_API_KEY" ]; then
+          if ! echo "$MCP_LIST" | grep -qi "notion"; then
+            MCP_ERRORS="${MCP_ERRORS}⚠️ Notion MCP server not registered (API key provided but server missing)\n"
+          fi
+        fi
+
+        if [ -n "$MCP_ERRORS" ]; then
+          printf "$MCP_ERRORS"
+          echo "::warning::Some MCP servers may not be properly registered"
+        else
+          echo "✅ All expected MCP servers registered"
+        fi
 
     # ── 6. Link skills and scripts ──────────────────────────────────────
     - name: Setup skills and scripts
@@ -472,9 +521,9 @@ runs:
           fi
         }
 
-        # Helper: detect linked work item ID from text
+        # Helper: detect linked work item ID from text (returns empty string if none found)
         detect_work_item_id() {
-          echo "$1" | grep -oP '(?:AB#|VYZN-|_workitems/edit/)(\d+)' | head -1 | grep -oP '\d+'
+          echo "$1" | grep -oP '(?:AB#|_workitems/edit/)(\d+)' 2>/dev/null | head -1 | grep -oP '\d+' || true
         }
 
         case "$SOURCE" in
@@ -482,7 +531,7 @@ runs:
             fetch_azdo_work_item "$AZDO_WORK_ITEM_ID"
             ;;
 
-          github|resume)
+          github|github-issue|resume)
             if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
               echo "=== Pull Request #$PR_NUMBER ===" > "$CONTEXT_FILE"
               PR_DATA=$(gh pr view "$PR_NUMBER" --json title,body,headRefName,baseRefName,files,comments 2>/dev/null || echo "{}")
@@ -500,19 +549,41 @@ runs:
                 echo "$PR_DATA" | jq -r '.comments[-5:]? // [] | .[]? | "- \(.author.login // "unknown"): \(.body | split("\n")[0] // "")"' >> "$CONTEXT_FILE" 2>/dev/null || true
 
                 # Check for linked AzDo work item from PR title, body, branch name
-                PR_TITLE=$(echo "$PR_DATA" | jq -r '.title // ""')
-                PR_BODY=$(echo "$PR_DATA" | jq -r '.body // ""')
-                PR_BRANCH=$(echo "$PR_DATA" | jq -r '.headRefName // ""')
-                LINKED_WI=$(detect_work_item_id "$PR_TITLE $PR_BODY $PR_BRANCH")
-                if [ -n "$LINKED_WI" ]; then
-                  echo "" >> "$CONTEXT_FILE"
-                  echo "--- Linked Work Item ---" >> "$CONTEXT_FILE"
-                  fetch_azdo_work_item "$LINKED_WI"
-                  echo "azdo_work_item_id=$LINKED_WI" >> "$GITHUB_OUTPUT"
+                # Only attempt if AzDo credentials are configured
+                if [ -n "$AZURE_DEVOPS_PAT" ] && [ -n "$AZURE_DEVOPS_ORG" ]; then
+                  PR_TITLE=$(echo "$PR_DATA" | jq -r '.title // ""')
+                  PR_BODY=$(echo "$PR_DATA" | jq -r '.body // ""')
+                  PR_BRANCH=$(echo "$PR_DATA" | jq -r '.headRefName // ""')
+                  LINKED_WI=$(detect_work_item_id "$PR_TITLE $PR_BODY $PR_BRANCH")
+                  if [ -n "$LINKED_WI" ]; then
+                    echo "" >> "$CONTEXT_FILE"
+                    echo "--- Linked Work Item ---" >> "$CONTEXT_FILE"
+                    fetch_azdo_work_item "$LINKED_WI"
+                    echo "azdo_work_item_id=$LINKED_WI" >> "$GITHUB_OUTPUT"
+                  fi
                 fi
               fi
             fi
             ;;
+
+          github-issue)
+            ISSUE_NUMBER="$PR_NUMBER"  # reuse pr_number output for issue number
+            if [ -n "$ISSUE_NUMBER" ] && [ "$ISSUE_NUMBER" != "null" ]; then
+              echo "=== Issue #$ISSUE_NUMBER ===" > "$CONTEXT_FILE"
+              ISSUE_DATA=$(gh issue view "$ISSUE_NUMBER" --json title,body,labels,comments 2>/dev/null || echo "{}")
+              if [ "$ISSUE_DATA" != "{}" ]; then
+                echo "**Title:** $(echo "$ISSUE_DATA" | jq -r '.title // "N/A"')" >> "$CONTEXT_FILE"
+                echo "**Labels:** $(echo "$ISSUE_DATA" | jq -r '[.labels[].name] | join(", ")' 2>/dev/null)" >> "$CONTEXT_FILE"
+                echo "" >> "$CONTEXT_FILE"
+                echo "**Description:**" >> "$CONTEXT_FILE"
+                echo "$ISSUE_DATA" | jq -r '.body // "No description"' >> "$CONTEXT_FILE"
+                echo "" >> "$CONTEXT_FILE"
+                echo "**Recent Comments:**" >> "$CONTEXT_FILE"
+                echo "$ISSUE_DATA" | jq -r '.comments[-5:]? // [] | .[]? | "- \(.author.login // "unknown"): \(.body | split("\n")[0] // "")"' >> "$CONTEXT_FILE" 2>/dev/null || true
+              fi
+            fi
+            ;;
+
           slack)
             # Fetch thread history if Slack bot token is available
             if [ -n "$SLACK_BOT_TOKEN" ] && [ -n "$SLACK_THREAD_TS" ]; then
@@ -535,13 +606,16 @@ runs:
                 ' >> "$CONTEXT_FILE"
 
                 # Check for linked AzDo work item from thread text
-                THREAD_TEXT=$(echo "$RESPONSE" | jq -r '.messages[].text' 2>/dev/null | tr '\n' ' ')
-                LINKED_WI=$(detect_work_item_id "$THREAD_TEXT")
-                if [ -n "$LINKED_WI" ]; then
-                  echo "" >> "$CONTEXT_FILE"
-                  echo "--- Linked Work Item ---" >> "$CONTEXT_FILE"
-                  fetch_azdo_work_item "$LINKED_WI"
-                  echo "azdo_work_item_id=$LINKED_WI" >> "$GITHUB_OUTPUT"
+                # Only attempt if AzDo credentials are configured
+                if [ -n "$AZURE_DEVOPS_PAT" ] && [ -n "$AZURE_DEVOPS_ORG" ]; then
+                  THREAD_TEXT=$(echo "$RESPONSE" | jq -r '.messages[].text' 2>/dev/null | tr '\n' ' ')
+                  LINKED_WI=$(detect_work_item_id "$THREAD_TEXT")
+                  if [ -n "$LINKED_WI" ]; then
+                    echo "" >> "$CONTEXT_FILE"
+                    echo "--- Linked Work Item ---" >> "$CONTEXT_FILE"
+                    fetch_azdo_work_item "$LINKED_WI"
+                    echo "azdo_work_item_id=$LINKED_WI" >> "$GITHUB_OUTPUT"
+                  fi
                 fi
               fi
             fi
@@ -564,6 +638,29 @@ runs:
           echo "has_context=true" >> "$GITHUB_OUTPUT"
         fi
 
+    # ── 8b. Post progress comment ────────────────────────────────────
+    - name: Post progress comment
+      if: (steps.source.outputs.source == 'github' || steps.source.outputs.source == 'github-issue') && steps.source.outputs.skip != 'true'
+      id: progress-comment
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ inputs.github_token }}
+        script: |
+          const prNumber = parseInt('${{ steps.source.outputs.pr_number }}');
+          if (!prNumber || isNaN(prNumber)) return;
+
+          const dryRun = '${{ inputs.dry_run }}' === 'true';
+          const mode = dryRun ? '🔍 Analyzing (dry-run)...' : '🤖 Working on it...';
+          const budget = '${{ inputs.max_budget_usd }}';
+
+          const { data: comment } = await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: prNumber,
+            body: `${mode}\n\n<sub>Budget: $${budget} | [Watch progress](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})</sub>`
+          });
+          core.setOutput('comment_id', comment.id);
+
     # ── 9. Compose prompt and run agent ─────────────────────────────────
     - name: Run PO Agent
       if: steps.source.outputs.skip != 'true'
@@ -576,9 +673,36 @@ runs:
         MAX_BUDGET: ${{ inputs.max_budget_usd }}
         SOURCE: ${{ steps.source.outputs.source }}
         USER_MESSAGE: ${{ steps.source.outputs.message }}
+        INPUT_BASE_URL: ${{ inputs.anthropic_base_url }}
+        INPUT_TIMEOUT: ${{ inputs.timeout_minutes }}
+        INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        INPUT_INVESTIGATION_MODEL: ${{ inputs.investigation_model }}
+        INPUT_IMPLEMENTATION_MODEL: ${{ inputs.implementation_model }}
       run: |
         export PATH="$HOME/.local/bin:$PATH"
         ACTION_DIR="${{ github.action_path }}"
+
+        # Set ANTHROPIC_BASE_URL from input (takes priority over secrets env var)
+        if [ -n "$INPUT_BASE_URL" ]; then
+          export ANTHROPIC_BASE_URL="$INPUT_BASE_URL"
+          echo "Using custom API base URL: $ANTHROPIC_BASE_URL"
+        fi
+
+        # Determine effective model
+        EFFECTIVE_MODEL="$ANTHROPIC_MODEL"
+        if [ -n "$INPUT_INVESTIGATION_MODEL" ] || [ -n "$INPUT_IMPLEMENTATION_MODEL" ]; then
+          # Detect task type from user message
+          MSG_LOWER=$(echo "$USER_MESSAGE" | tr '[:upper:]' '[:lower:]')
+          if echo "$MSG_LOWER" | grep -qE "^(what|why|how|explain|review|analyze|check|look at|describe|summarize|investigate)"; then
+            # Investigation/read-only task
+            [ -n "$INPUT_INVESTIGATION_MODEL" ] && EFFECTIVE_MODEL="$INPUT_INVESTIGATION_MODEL"
+            echo "Task detected as investigation — using model: $EFFECTIVE_MODEL"
+          else
+            # Implementation task
+            [ -n "$INPUT_IMPLEMENTATION_MODEL" ] && EFFECTIVE_MODEL="$INPUT_IMPLEMENTATION_MODEL"
+            echo "Task detected as implementation — using model: $EFFECTIVE_MODEL"
+          fi
+        fi
 
         # Build system prompt
         cp "$ACTION_DIR/prompts/core.md" /tmp/prompt.txt
@@ -607,6 +731,40 @@ runs:
           echo "=== End of context ===" >> /tmp/prompt.txt
         fi
 
+        # Add dry-run instructions if enabled
+        if [ "$INPUT_DRY_RUN" = "true" ]; then
+          echo "" >> /tmp/prompt.txt
+          echo "---" >> /tmp/prompt.txt
+          echo "## DRY RUN MODE" >> /tmp/prompt.txt
+          echo "You are in **dry-run mode**. Do NOT make any code changes, commits, or pushes." >> /tmp/prompt.txt
+          echo "Instead:" >> /tmp/prompt.txt
+          echo "1. Investigate the request thoroughly" >> /tmp/prompt.txt
+          echo "2. Outline what you WOULD do (files to change, approach, risks)" >> /tmp/prompt.txt
+          echo "3. Provide a cost/complexity estimate" >> /tmp/prompt.txt
+          echo "4. Stop after presenting your analysis" >> /tmp/prompt.txt
+          echo "" >> /tmp/prompt.txt
+        fi
+
+        # Add timeout awareness
+        if [ -n "$INPUT_TIMEOUT" ] && [ "$INPUT_TIMEOUT" != "0" ]; then
+          echo "" >> /tmp/prompt.txt
+          echo "## Time Constraint" >> /tmp/prompt.txt
+          echo "You have approximately **${INPUT_TIMEOUT} minutes** before this session times out." >> /tmp/prompt.txt
+          echo "Commit and push work-in-progress (WIP) before time runs out. Uncommitted work is lost." >> /tmp/prompt.txt
+          echo "" >> /tmp/prompt.txt
+        fi
+
+        # Load persistent context from previous runs (if any)
+        PR_NUM="${{ steps.source.outputs.pr_number }}"
+        PERSISTENT_CTX=".po-agent/context/pr-${PR_NUM}.md"
+        if [ -n "$PR_NUM" ] && [ "$PR_NUM" != "null" ] && [ -f "$PERSISTENT_CTX" ]; then
+          echo "" >> /tmp/prompt.txt
+          echo "=== Previous Session Context ===" >> /tmp/prompt.txt
+          head -c 5000 "$PERSISTENT_CTX" >> /tmp/prompt.txt
+          echo "" >> /tmp/prompt.txt
+          echo "=== End Previous Session Context ===" >> /tmp/prompt.txt
+        fi
+
         # Add user message
         echo "" >> /tmp/prompt.txt
         echo "User message:" >> /tmp/prompt.txt
@@ -615,15 +773,40 @@ runs:
         # Create artifacts directory
         mkdir -p /tmp/agent-artifacts/{screenshots,transcripts}
 
-        # Run Claude Code
-        echo "=== Running PO Agent (source: $SOURCE, budget: \$$MAX_BUDGET) ==="
+        # Cost estimation (rough heuristic based on prompt size)
+        PROMPT_SIZE=$(wc -c < /tmp/prompt.txt | tr -d ' ')
+        PROMPT_TOKENS_EST=$((PROMPT_SIZE / 4))  # ~4 chars per token
+        # Rough cost estimate: $3/MTok input, $15/MTok output, assume 3x output vs input
+        EST_INPUT_COST=$(awk "BEGIN {printf \"%.4f\", $PROMPT_TOKENS_EST / 1000000 * 3}")
+        EST_TOTAL=$(awk "BEGIN {printf \"%.2f\", $EST_INPUT_COST * 4}")
+        echo "::notice::Cost estimate: ~\$${EST_TOTAL} USD (prompt: ${PROMPT_TOKENS_EST} tokens est.)"
+        if [ "$(awk "BEGIN {print ($EST_TOTAL > $MAX_BUDGET)}")" = "1" ]; then
+          echo "::warning::Estimated cost (\$${EST_TOTAL}) may exceed budget (\$${MAX_BUDGET}). Consider increasing max_budget_usd."
+        fi
 
-        "$CLAUDE_PATH" --print \
-          --verbose \
-          --dangerously-skip-permissions \
-          --max-budget-usd "$MAX_BUDGET" \
-          --output-format stream-json \
-          "$(cat /tmp/prompt.txt)" 2>&1 | tee /tmp/agent-artifacts/transcripts/transcript.jsonl || true
+        # Build Claude CLI arguments
+        CLAUDE_ARGS=(
+          --print
+          --verbose
+          --dangerously-skip-permissions
+          --max-budget-usd "$MAX_BUDGET"
+          --output-format stream-json
+          --model "$EFFECTIVE_MODEL"
+        )
+
+        # Run Claude Code
+        echo "=== Running PO Agent (source: $SOURCE, model: $EFFECTIVE_MODEL, budget: \$$MAX_BUDGET) ==="
+
+        CLAUDE_EXIT_CODE=0
+        "$CLAUDE_PATH" "${CLAUDE_ARGS[@]}" \
+          "$(cat /tmp/prompt.txt)" 2>/tmp/agent_stderr.log | tee /tmp/agent-artifacts/transcripts/transcript.jsonl || CLAUDE_EXIT_CODE=$?
+
+        # Log stderr for diagnostics (always)
+        if [ -f /tmp/agent_stderr.log ] && [ -s /tmp/agent_stderr.log ]; then
+          echo "::group::Claude Code stderr"
+          cat /tmp/agent_stderr.log
+          echo "::endgroup::"
+        fi
 
         # Extract result from stream-json
         RESULT_LINE=$(grep '"type":"result"' /tmp/agent-artifacts/transcripts/transcript.jsonl 2>/dev/null | tail -1)
@@ -697,7 +880,39 @@ runs:
 
           echo "cost_usd=$COST_USD" >> "$GITHUB_OUTPUT"
         else
-          echo "The agent did not produce a result. Check workflow logs." > /tmp/agent_output.txt
+          # No result line found — classify the error from stderr
+          STDERR_CONTENT=""
+          [ -f /tmp/agent_stderr.log ] && STDERR_CONTENT=$(cat /tmp/agent_stderr.log 2>/dev/null || true)
+
+          ERROR_TYPE="unknown"
+          ERROR_HINT=""
+          if echo "$STDERR_CONTENT" | grep -qiE "401|unauthorized|invalid.*api.?key|authentication"; then
+            ERROR_TYPE="auth"
+            ERROR_HINT="Check that \`anthropic_api_key\` is valid and not expired. If using a proxy (\`ANTHROPIC_BASE_URL\`), verify the proxy is running."
+          elif echo "$STDERR_CONTENT" | grep -qiE "429|rate.?limit|too many requests|overloaded"; then
+            ERROR_TYPE="rate_limit"
+            ERROR_HINT="The API is rate-limited or overloaded. Wait a few minutes and retry, or reduce \`max_budget_usd\`."
+          elif echo "$STDERR_CONTENT" | grep -qiE "timeout|ETIMEDOUT|ECONNREFUSED|ENOTFOUND|network|connection"; then
+            ERROR_TYPE="network"
+            ERROR_HINT="Network error reaching the API. If using \`ANTHROPIC_BASE_URL\`, ensure the proxy is reachable."
+          elif echo "$STDERR_CONTENT" | grep -qiE "500|502|503|504|internal server error|bad gateway|service unavailable"; then
+            ERROR_TYPE="server"
+            ERROR_HINT="The API returned a server error. This is usually transient — retry in a few minutes."
+          elif [ "$CLAUDE_EXIT_CODE" -ne 0 ]; then
+            ERROR_HINT="Claude Code exited with code $CLAUDE_EXIT_CODE. Check the workflow logs for details."
+          fi
+
+          {
+            printf "❌ **PO Agent Failed**\n\n"
+            printf "The agent did not produce a result (error type: \`%s\`).\n\n" "$ERROR_TYPE"
+            if [ -n "$ERROR_HINT" ]; then
+              printf "> 💡 %s\n\n" "$ERROR_HINT"
+            fi
+            if [ -n "$STDERR_CONTENT" ]; then
+              printf "<details><summary>Stderr output (last 2000 chars)</summary>\n\n\`\`\`\n%s\n\`\`\`\n</details>\n" "$(echo "$STDERR_CONTENT" | tail -c 2000)"
+            fi
+            printf "\n[View full logs](https://github.com/%s/actions/runs/%s)\n" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+          } > /tmp/agent_output.txt
         fi
 
         # Store response for output
@@ -705,6 +920,80 @@ runs:
         echo "response<<RESPONSE_EOF" >> "$GITHUB_OUTPUT"
         echo "$RESPONSE" >> "$GITHUB_OUTPUT"
         echo "RESPONSE_EOF" >> "$GITHUB_OUTPUT"
+
+    # ── 9b. Save persistent context for future resumes ─────────────────
+    - name: Save persistent context
+      if: steps.source.outputs.skip != 'true'
+      shell: bash
+      env:
+        SOURCE: ${{ steps.source.outputs.source }}
+        PR_NUMBER: ${{ steps.source.outputs.pr_number }}
+        COST_USD: ${{ steps.run-agent.outputs.cost_usd }}
+        GH_TOKEN: ${{ inputs.github_token }}
+      run: |
+        if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
+          echo "No PR number — skipping persistent context"
+          exit 0
+        fi
+
+        CTX_DIR=".po-agent/context"
+        CTX_FILE="$CTX_DIR/pr-${PR_NUMBER}.md"
+        mkdir -p "$CTX_DIR"
+
+        # Build context summary
+        RESPONSE_PREVIEW=""
+        [ -f /tmp/agent_output.txt ] && RESPONSE_PREVIEW=$(head -c 3000 /tmp/agent_output.txt 2>/dev/null || true)
+
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        ATTEMPT="${{ steps.source.outputs.resume_attempt }}"
+        [ -z "$ATTEMPT" ] && ATTEMPT="1"
+
+        {
+          echo "# Session Context for PR #${PR_NUMBER}"
+          echo ""
+          echo "Last updated: ${TIMESTAMP}"
+          echo "Source: ${SOURCE} | Attempt: ${ATTEMPT} | Cost: \$${COST_USD:-0}"
+          echo ""
+          echo "## Last Response Summary"
+          echo ""
+          echo "$RESPONSE_PREVIEW"
+          echo ""
+        } > "$CTX_FILE"
+
+        # Save transcript summary for debugging
+        TRANSCRIPT_DIR=".po-agent/transcripts"
+        if [ -f /tmp/agent-artifacts/transcripts/transcript.jsonl ]; then
+          mkdir -p "$TRANSCRIPT_DIR"
+          TRANSCRIPT_FILE="$TRANSCRIPT_DIR/pr-${PR_NUMBER}-attempt-${ATTEMPT}.md"
+          {
+            echo "# Transcript Summary: PR #${PR_NUMBER} — Attempt ${ATTEMPT}"
+            echo ""
+            echo "Date: ${TIMESTAMP} | Cost: \$${COST_USD:-0}"
+            echo ""
+            echo "## Tool Usage"
+            echo ""
+            jq -r 'select(.type == "tool_use") | .name // empty' /tmp/agent-artifacts/transcripts/transcript.jsonl 2>/dev/null | sort | uniq -c | sort -rn | head -15 | awk '{printf "- `%s`: %s calls\n", $2, $1}' || echo "(none)"
+            echo ""
+            echo "## Files Modified"
+            echo ""
+            jq -r 'select(.type == "tool_use") | select(.name == "Write" or .name == "Edit" or .name == "write_file" or .name == "edit_file") | .input.file_path // .input.path // empty' /tmp/agent-artifacts/transcripts/transcript.jsonl 2>/dev/null | sort -u | head -20 | awk '{printf "- `%s`\n", $0}' || echo "(none)"
+            echo ""
+            echo "## Errors Encountered"
+            echo ""
+            jq -r 'select(.type == "tool_result") | select(.is_error == true) | .content // empty' /tmp/agent-artifacts/transcripts/transcript.jsonl 2>/dev/null | head -c 2000 || echo "(none)"
+            echo ""
+          } > "$TRANSCRIPT_FILE"
+
+          git add "$TRANSCRIPT_FILE" 2>/dev/null || true
+        fi
+
+        # Commit the context + transcript (non-blocking, best-effort)
+        git add "$CTX_FILE" 2>/dev/null || true
+        git diff --cached --quiet 2>/dev/null || {
+          git commit -m "chore: update po-agent context/transcript for PR #${PR_NUMBER} [skip ci]" --no-verify 2>/dev/null || true
+          git push 2>/dev/null || true
+        }
+        echo "Saved persistent context to $CTX_FILE"
 
     # ── 10. Finalize Playwright ─────────────────────────────────────────
     - name: Finalize Playwright recordings
@@ -757,7 +1046,7 @@ runs:
         ARTIFACT_DL_URL="$RUN_URL#artifacts"
 
         case "$SOURCE" in
-          github|resume)
+          github|github-issue|resume)
             # For GitHub: embed images inline, link videos
             ARTIFACT_BLOCK=$'\n\n---\n📎 **Artifacts**\n'
             while IFS= read -r artifact; do
@@ -805,10 +1094,11 @@ runs:
 
     # ── 12. Post response ───────────────────────────────────────────────
     - name: Post response to GitHub PR
-      if: always() && (steps.source.outputs.source == 'github' || steps.source.outputs.source == 'resume') && steps.source.outputs.skip != 'true'
+      if: always() && (steps.source.outputs.source == 'github' || steps.source.outputs.source == 'github-issue' || steps.source.outputs.source == 'resume') && steps.source.outputs.skip != 'true'
       uses: actions/github-script@v7
       env:
         COST_USD: ${{ steps.run-agent.outputs.cost_usd }}
+        PROGRESS_COMMENT_ID: ${{ steps.progress-comment.outputs.comment_id }}
       with:
         github-token: ${{ inputs.github_token }}
         script: |
@@ -818,6 +1108,16 @@ runs:
             response = fs.readFileSync('/tmp/agent_output.txt', 'utf8').slice(-10000);
           } catch (e) {
             response = 'The agent did not produce output. Check workflow logs.';
+          }
+
+          // Delete the progress comment
+          const progressCommentId = parseInt(process.env.PROGRESS_COMMENT_ID);
+          if (progressCommentId && !isNaN(progressCommentId)) {
+            await github.rest.issues.deleteComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: progressCommentId
+            }).catch(() => {});
           }
 
           const costUsd = process.env.COST_USD;
@@ -832,7 +1132,7 @@ runs:
 
           // Add completion reaction to original comment
           const commentId = parseInt('${{ steps.source.outputs.comment_id }}');
-          if (commentId && !isNaN(commentId) && source === 'github') {
+          if (commentId && !isNaN(commentId) && (source === 'github' || source === 'github-issue')) {
             await github.rest.reactions.createForIssueComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -1125,7 +1425,7 @@ runs:
 
         # Post cancellation notice to source
         case "$SOURCE" in
-          github|resume)
+          github|github-issue|resume)
             if [ -n "$PR_NUMBER" ] && [ "$PR_NUMBER" != "null" ]; then
               gh pr comment "$PR_NUMBER" --body "$CANCEL_MSG"$'\n\n'"---"$'\n'"*🤖 [cancelled run](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)*" || true
             fi

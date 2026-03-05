@@ -31,6 +31,6 @@ Magic token: `<!-- WAITING_FOR_HUMAN -->`
 
 ### Final Checklist
 1. All code changes committed and pushed
-2. PR created with format: `VYZN-[id]: [desc] AB#[id]`
+2. PR created with format: `AB#[id]: [desc]`
 3. If waiting for human: `<!-- WAITING_FOR_HUMAN -->` at the end
 4. If waiting for CI: just end normally (auto-resume handles it)

@@ -192,8 +192,8 @@ runs:
           // Priority: explicit input > detected from PR title
           let workItemId = process.env.WORK_ITEM_ID;
           if (!workItemId) {
-            // Try to detect from PR title (VYZN-1234 or AB#1234)
-            const titleMatch = prData.title?.match(/(?:AB#|VYZN-)(\d+)/);
+            // Try to detect from PR title (AB#1234 or _workitems/edit/1234)
+            const titleMatch = prData.title?.match(/(?:AB#|_workitems\/edit\/)(\d+)/);
             if (titleMatch) workItemId = titleMatch[1];
           }
           if (workItemId) {

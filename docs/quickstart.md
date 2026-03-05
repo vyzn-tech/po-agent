@@ -17,9 +17,10 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
 jobs:
   agent:
-    if: github.event.issue.pull_request && contains(github.event.comment.body, '@po-agent')
+    if: contains(github.event.comment.body, '@po-agent')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -28,6 +29,8 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
+
+> **Note:** The agent works on both PR comments and issue comments. For issues, it will create a branch and PR automatically.
 
 ## Step 2: Add your API key
 
