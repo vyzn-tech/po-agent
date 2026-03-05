@@ -191,7 +191,7 @@ runs:
 
         AZDO_PROJECT_ENCODED=$(echo "$AZURE_DEVOPS_PROJECT" | sed 's/ /%20/g')
         AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZDO_PROJECT_ENCODED/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
-        AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
+        AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64 | tr -d '\n')
         WORKFLOW_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
         # 1. React to the triggering comment
@@ -204,21 +204,11 @@ runs:
 
         # 2. Post "Starting work..." comment
         COMMENT_BODY="<p>🤖 <strong>Starting work...</strong></p><p>Follow progress: <a href=\"${WORKFLOW_URL}\">workflow run</a></p>"
-        echo "::warning::AZDO_URL=${AZDO_URL}"
-        echo "::warning::AUTH length=$(echo -n "$AUTH" | wc -c)"
-        echo "::warning::PAT length=$(echo -n "$AZURE_DEVOPS_PAT" | wc -c)"
-        HTTP_CODE=$(curl -s --http1.1 -o /tmp/azdo_response.txt -w "%{http_code}" -X POST \
+        curl -sf --http1.1 -X POST \
           "${AZDO_URL}/comments?api-version=7.1-preview.4" \
           -H "Authorization: Basic $AUTH" \
           -H "Content-Type: application/json" \
-          -d "{\"text\": \"$COMMENT_BODY\"}" 2>/tmp/azdo_curl_err.txt)
-        if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
-          echo "::warning::Failed to post AzDo comment (HTTP $HTTP_CODE)"
-          echo "::warning::curl stderr: $(cat /tmp/azdo_curl_err.txt 2>/dev/null)"
-          echo "::warning::response body: $(cat /tmp/azdo_response.txt 2>/dev/null | head -c 500)"
-        else
-          echo "::notice::Successfully posted AzDo comment (HTTP $HTTP_CODE)"
-        fi
+          -d "{\"text\": \"$COMMENT_BODY\"}" > /dev/null 2>&1 || echo "::warning::Failed to post AzDo comment"
 
         # 3. Set po-agent:in-progress tag
         CURRENT_TAGS=$(curl -sf \
@@ -236,15 +226,11 @@ runs:
           NEW_TAGS="${NEW_TAGS}; po-agent:attempt-1"
         fi
 
-        HTTP_CODE=$(curl -s -o /tmp/azdo_tags_response.txt -w "%{http_code}" -X PATCH \
+        curl -sf -X PATCH \
           "${AZDO_URL}?api-version=7.0" \
           -H "Authorization: Basic $AUTH" \
           -H "Content-Type: application/json-patch+json" \
-          -d "[{\"op\": \"replace\", \"path\": \"/fields/System.Tags\", \"value\": \"$NEW_TAGS\"}]" 2>/tmp/azdo_tags_err.txt)
-        if [ "$HTTP_CODE" != "200" ]; then
-          echo "::warning::Failed to update AzDo tags (HTTP $HTTP_CODE)"
-          echo "::warning::tags response: $(cat /tmp/azdo_tags_response.txt 2>/dev/null | head -c 500)"
-        fi
+          -d "[{\"op\": \"replace\", \"path\": \"/fields/System.Tags\", \"value\": \"$NEW_TAGS\"}]" > /dev/null 2>&1 || echo "::warning::Failed to update AzDo tags"
 
     # ── 3. Install Claude Code CLI ──────────────────────────────────────
     - name: Install Claude Code
@@ -411,7 +397,7 @@ runs:
             return
           fi
 
-          local AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
+          local AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64 | tr -d '\n')
           local AZDO_PROJECT_ENCODED=$(echo "$AZURE_DEVOPS_PROJECT" | sed 's/ /%20/g')
           local AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZDO_PROJECT_ENCODED/_apis/wit/workitems/$WI_ID"
 
@@ -913,7 +899,7 @@ runs:
           exit 0
         fi
 
-        AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
+        AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64 | tr -d '\n')
         AZDO_PROJECT_ENCODED=$(echo "$AZURE_DEVOPS_PROJECT" | sed 's/ /%20/g')
         AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZDO_PROJECT_ENCODED/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
         WORKFLOW_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
@@ -1076,7 +1062,7 @@ runs:
             ;;
           azure-devops)
             if [ -n "$AZURE_DEVOPS_PAT" ] && [ -n "$AZURE_DEVOPS_ORG" ] && [ -n "$AZDO_WORK_ITEM_ID" ]; then
-              AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
+              AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64 | tr -d '\n')
               AZDO_PROJECT_ENCODED=$(echo "$AZURE_DEVOPS_PROJECT" | sed 's/ /%20/g')
               AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZDO_PROJECT_ENCODED/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
               CANCEL_HTML="<p>⚠️ <strong>PO Agent run was cancelled.</strong></p><p><a href=\"https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\">workflow run</a></p>"
