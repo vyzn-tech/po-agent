@@ -24,9 +24,9 @@
 
 ---
 
-## Why I Built This
+## Why We Built This
 
-I want to **enable every organisation to have a 24/7 dev factory.**
+We want to **enable every organisation to have a 24/7 dev factory.**
 
 Software doesn't sleep, and neither should your development pipeline. Whether you're a solo founder, a small team, or a large enterprise — you deserve an autonomous developer that investigates, implements, tests, and delivers around the clock. Not a copilot that waits for you to type. A teammate that picks up work, finishes it, and asks for review.
 
@@ -307,22 +307,6 @@ At runtime:
 3. Compose system prompt: `core.md` + source-specific fragment + context
 4. Run Claude Code with your `CLAUDE.md` as project context
 5. Post the response back to source (PR comment, Slack message, etc.)
-
----
-
-## Comparison
-
-| | Copilot Coding Agent | Cursor | Devin | **PO Agent** |
-|---|:---:|:---:|:---:|:---:|
-| Triggered from PRs | ✅ | — | — | ✅ |
-| Triggered from Slack | — | — | — | ✅ |
-| Triggered from any webhook | — | — | — | ✅ |
-| Auto-resumes after CI | — | — | partial | ✅ |
-| Browser verification | — | — | partial | ✅ |
-| Budget management | — | — | — | ✅ |
-| Customisable workflows | — | limited | — | ✅ |
-| Open source | — | — | — | ✅ |
-| Runs on your own CI | — | — | — | ✅ |
 
 ---
 
