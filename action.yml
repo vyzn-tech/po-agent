@@ -472,9 +472,9 @@ runs:
           fi
         }
 
-        # Helper: detect linked work item ID from text
+        # Helper: detect linked work item ID from text (returns empty string if none found)
         detect_work_item_id() {
-          echo "$1" | grep -oP '(?:AB#|VYZN-|_workitems/edit/)(\d+)' | head -1 | grep -oP '\d+'
+          echo "$1" | grep -oP '(?:AB#|_workitems/edit/)(\d+)' 2>/dev/null | head -1 | grep -oP '\d+' || true
         }
 
         case "$SOURCE" in
@@ -500,15 +500,18 @@ runs:
                 echo "$PR_DATA" | jq -r '.comments[-5:]? // [] | .[]? | "- \(.author.login // "unknown"): \(.body | split("\n")[0] // "")"' >> "$CONTEXT_FILE" 2>/dev/null || true
 
                 # Check for linked AzDo work item from PR title, body, branch name
-                PR_TITLE=$(echo "$PR_DATA" | jq -r '.title // ""')
-                PR_BODY=$(echo "$PR_DATA" | jq -r '.body // ""')
-                PR_BRANCH=$(echo "$PR_DATA" | jq -r '.headRefName // ""')
-                LINKED_WI=$(detect_work_item_id "$PR_TITLE $PR_BODY $PR_BRANCH")
-                if [ -n "$LINKED_WI" ]; then
-                  echo "" >> "$CONTEXT_FILE"
-                  echo "--- Linked Work Item ---" >> "$CONTEXT_FILE"
-                  fetch_azdo_work_item "$LINKED_WI"
-                  echo "azdo_work_item_id=$LINKED_WI" >> "$GITHUB_OUTPUT"
+                # Only attempt if AzDo credentials are configured
+                if [ -n "$AZURE_DEVOPS_PAT" ] && [ -n "$AZURE_DEVOPS_ORG" ]; then
+                  PR_TITLE=$(echo "$PR_DATA" | jq -r '.title // ""')
+                  PR_BODY=$(echo "$PR_DATA" | jq -r '.body // ""')
+                  PR_BRANCH=$(echo "$PR_DATA" | jq -r '.headRefName // ""')
+                  LINKED_WI=$(detect_work_item_id "$PR_TITLE $PR_BODY $PR_BRANCH")
+                  if [ -n "$LINKED_WI" ]; then
+                    echo "" >> "$CONTEXT_FILE"
+                    echo "--- Linked Work Item ---" >> "$CONTEXT_FILE"
+                    fetch_azdo_work_item "$LINKED_WI"
+                    echo "azdo_work_item_id=$LINKED_WI" >> "$GITHUB_OUTPUT"
+                  fi
                 fi
               fi
             fi
@@ -535,13 +538,16 @@ runs:
                 ' >> "$CONTEXT_FILE"
 
                 # Check for linked AzDo work item from thread text
-                THREAD_TEXT=$(echo "$RESPONSE" | jq -r '.messages[].text' 2>/dev/null | tr '\n' ' ')
-                LINKED_WI=$(detect_work_item_id "$THREAD_TEXT")
-                if [ -n "$LINKED_WI" ]; then
-                  echo "" >> "$CONTEXT_FILE"
-                  echo "--- Linked Work Item ---" >> "$CONTEXT_FILE"
-                  fetch_azdo_work_item "$LINKED_WI"
-                  echo "azdo_work_item_id=$LINKED_WI" >> "$GITHUB_OUTPUT"
+                # Only attempt if AzDo credentials are configured
+                if [ -n "$AZURE_DEVOPS_PAT" ] && [ -n "$AZURE_DEVOPS_ORG" ]; then
+                  THREAD_TEXT=$(echo "$RESPONSE" | jq -r '.messages[].text' 2>/dev/null | tr '\n' ' ')
+                  LINKED_WI=$(detect_work_item_id "$THREAD_TEXT")
+                  if [ -n "$LINKED_WI" ]; then
+                    echo "" >> "$CONTEXT_FILE"
+                    echo "--- Linked Work Item ---" >> "$CONTEXT_FILE"
+                    fetch_azdo_work_item "$LINKED_WI"
+                    echo "azdo_work_item_id=$LINKED_WI" >> "$GITHUB_OUTPUT"
+                  fi
                 fi
               fi
             fi
