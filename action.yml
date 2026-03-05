@@ -848,6 +848,42 @@ runs:
             body: `${resumeLabel}${mention}${response}\n\n---\n*🤖 [workflow run](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})*${costLine}`
           });
 
+          // Manage po-agent labels for resume workflow
+          const waitingCi = /created pull request|pushed|PR #\d+|git push|the push was|pr preview/i.test(response);
+          const waitingHuman = response.includes('<!-- WAITING_FOR_HUMAN -->');
+
+          if (waitingCi || waitingHuman) {
+            const labelToAdd = waitingHuman ? 'po-agent:waiting-human' : 'po-agent:waiting-ci';
+            // Ensure labels exist
+            for (const label of [labelToAdd, 'po-agent:attempt-1']) {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner, repo: context.repo.repo,
+                name: label, color: label.includes('waiting-ci') ? 'FFA500' : label.includes('waiting-human') ? 'D93F0B' : 'EDEDED'
+              }).catch(() => {});
+            }
+            // Add waiting label
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: prNumber, labels: [labelToAdd]
+            }).catch(e => console.log(`Failed to add ${labelToAdd} label: ${e.message}`));
+            // Remove in-progress if present
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: prNumber, name: 'po-agent:in-progress'
+            }).catch(() => {});
+            // Add attempt-1 if no attempt label
+            const { data: prLabels } = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner, repo: context.repo.repo, issue_number: prNumber
+            });
+            if (!prLabels.some(l => l.name.startsWith('po-agent:attempt-'))) {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: prNumber, labels: ['po-agent:attempt-1']
+              }).catch(() => {});
+            }
+            console.log(`Added ${labelToAdd} label to PR #${prNumber}`);
+          }
+
     - name: Post response to Slack
       if: always() && steps.source.outputs.source == 'slack' && steps.source.outputs.skip != 'true'
       shell: bash
@@ -899,6 +935,8 @@ runs:
         COST_USD: ${{ steps.run-agent.outputs.cost_usd }}
         AZDO_WORK_ITEM_ID: ${{ steps.source.outputs.azdo_work_item_id || steps.source.outputs.work_item_id || steps.context.outputs.azdo_work_item_id }}
         RESUME_ATTEMPT: ${{ steps.source.outputs.resume_attempt }}
+        PR_NUMBER_INPUT: ${{ steps.source.outputs.pr_number }}
+        GH_TOKEN: ${{ inputs.github_token }}
       run: |
         if [ -z "$AZURE_DEVOPS_PAT" ] || [ -z "$AZURE_DEVOPS_ORG" ] || [ -z "$AZDO_WORK_ITEM_ID" ]; then
           echo "No AzDo credentials or work item ID — skipping"
@@ -955,6 +993,43 @@ runs:
           NEW_STATUS="failed"
         else
           NEW_STATUS="done"
+        fi
+
+        # Manage GitHub PR labels for resume workflow
+        if [ "$NEW_STATUS" = "waiting-ci" ] || [ "$NEW_STATUS" = "waiting-human" ]; then
+          # Try to find PR number from source output or from response text
+          DETECTED_PR=""
+          if [ -n "$PR_NUMBER_INPUT" ] && [ "$PR_NUMBER_INPUT" != "null" ]; then
+            DETECTED_PR="$PR_NUMBER_INPUT"
+          else
+            # Extract PR number from response (e.g., "PR #3144" or "/pull/3144")
+            DETECTED_PR=$(echo "$RESPONSE" | grep -oP '(?:PR #|/pull/)(\d+)' | head -1 | grep -oP '\d+' || true)
+          fi
+          if [ -n "$DETECTED_PR" ]; then
+            # Create labels if they don't exist (ignore errors)
+            gh label create "po-agent:waiting-ci" --color "FFA500" --description "PO Agent waiting for CI" --force 2>/dev/null || true
+            gh label create "po-agent:in-progress" --color "1D76DB" --description "PO Agent in progress" --force 2>/dev/null || true
+            gh label create "po-agent:attempt-1" --color "EDEDED" --force 2>/dev/null || true
+
+            if [ "$NEW_STATUS" = "waiting-ci" ]; then
+              gh pr edit "$DETECTED_PR" --add-label "po-agent:waiting-ci" 2>/dev/null || echo "::warning::Failed to add waiting-ci label to PR #$DETECTED_PR"
+              # Remove in-progress label if present
+              gh pr edit "$DETECTED_PR" --remove-label "po-agent:in-progress" 2>/dev/null || true
+            elif [ "$NEW_STATUS" = "waiting-human" ]; then
+              gh pr edit "$DETECTED_PR" --add-label "po-agent:waiting-human" 2>/dev/null || true
+              gh pr edit "$DETECTED_PR" --remove-label "po-agent:in-progress" 2>/dev/null || true
+            fi
+
+            # Add attempt label if not present
+            CURRENT_LABELS=$(gh pr view "$DETECTED_PR" --json labels --jq '[.labels[].name]' 2>/dev/null || echo "[]")
+            if ! echo "$CURRENT_LABELS" | grep -q 'po-agent:attempt-'; then
+              gh label create "po-agent:attempt-1" --color "EDEDED" --force 2>/dev/null || true
+              gh pr edit "$DETECTED_PR" --add-label "po-agent:attempt-1" 2>/dev/null || true
+            fi
+            echo "Added po-agent:$NEW_STATUS label to PR #$DETECTED_PR"
+          else
+            echo "::warning::Could not detect PR number for label management"
+          fi
         fi
 
         # Update tags on work item
