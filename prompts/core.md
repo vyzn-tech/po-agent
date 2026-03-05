@@ -36,6 +36,32 @@ See `/playwright-verify` for Playwright usage and screenshot best practices.
 
 ---
 
+## Task Type Detection & Skill Routing
+
+**Before starting work**, classify the request:
+
+### Questions / Analysis (read-only)
+Requests starting with "what", "why", "how", "explain", "review", "analyze", "check", "describe", "summarize", "investigate".
+→ **Skip** `/mandatory-gates`. Just investigate and respond.
+
+### Bug Fixes
+Requests mentioning "fix", "bug", "broken", "error", "failing", "crash", "not working".
+→ **MUST** invoke `/mandatory-gates` first, then follow `/bug-fix-workflow`.
+
+### Feature Implementation
+Requests mentioning "implement", "add", "create", "build", "develop", "feature", "story".
+→ **MUST** invoke `/mandatory-gates` first, then follow `/story-workflow`.
+
+### Code Review
+Requests mentioning "review", "LGTM", "feedback", "approve".
+→ Analyze changes, provide structured feedback. No gates needed.
+
+### CI / Pipeline Issues
+Requests about CI failures, test failures, deployment issues.
+→ Investigate with `gh run view --log-failed`, fix, push. Use `/code-quality` before pushing.
+
+---
+
 ## Skills
 
 Use these skills when you need detailed instructions:
