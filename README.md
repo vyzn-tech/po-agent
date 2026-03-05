@@ -1,42 +1,60 @@
-# PO Agent
+<p align="center">
+  <strong><span style="font-size:3em;">PO Agent</span></strong>
+</p>
 
-**Add an AI Product Owner to your repo in 14 lines of YAML.**
+<h1 align="center">PO Agent</h1>
 
-Comment `@po-agent fix this bug` on a PR. It investigates, implements, pushes, waits for CI, handles review comments, and validates — all autonomously.
+<p align="center">
+  An AI Product Owner that lives in your GitHub repo. It investigates, implements, tests, and delivers — autonomously.
+</p>
 
-Customize everything with markdown files in `.po-agent/skills/`. No config schemas. No DSLs. Just markdown.
+<p align="center">
+  <a href="docs/quickstart.md">Quickstart</a>&nbsp; · &nbsp;
+  <a href="docs/writing-skills.md">Write a Skill</a>&nbsp; · &nbsp;
+  <a href="docs/architecture.md">Architecture</a>&nbsp; · &nbsp;
+  <a href="docs/rfs.md">RFS</a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/runtime-GitHub%20Actions-2088FF?logo=github-actions&logoColor=white" alt="GitHub Actions">
+  <img src="https://img.shields.io/badge/engine-Claude%20Code-CC785C?logo=anthropic&logoColor=white" alt="Claude Code">
+  <img src="https://img.shields.io/badge/skills-markdown-000000?logo=markdown&logoColor=white" alt="Markdown Skills">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
+</p>
 
 ---
 
 ## Why I Built This
 
-My motivation is simple: **enable every organisation to have a 24/7 dev factory.** Software doesn't sleep, and neither should your development pipeline. Whether you're a solo founder, a small team, or a large enterprise — PO Agent gives you an autonomous developer that investigates, implements, tests, and delivers around the clock.
+I want to **enable every organisation to have a 24/7 dev factory.**
+
+Software doesn't sleep, and neither should your development pipeline. Whether you're a solo founder, a small team, or a large enterprise — you deserve an autonomous developer that investigates, implements, tests, and delivers around the clock. Not a copilot that waits for you to type. A teammate that picks up work, finishes it, and asks for review.
 
 Let's build, build, build.
 
 ---
 
-## Principles
+## Philosophy
 
-**Think first, code second.** The agent doesn't jump straight to implementation. It investigates the problem, assesses confidence, and confirms scope before writing a single line. Mandatory gates enforce this discipline — every time.
+**Think first, code second.** The agent doesn't jump to implementation. It investigates the problem, assesses its confidence, and confirms scope before writing a single line. Mandatory gates enforce this discipline — every time.
 
 **Skills over configuration.** No YAML schemas, no DSLs, no plugin APIs. Skills are plain markdown files that describe workflows in human language. If you can write a README, you can teach the agent a new workflow.
 
-**Your repo, your rules.** Override any built-in skill by dropping a markdown file in `.po-agent/skills/`. The agent adapts to your stack, your conventions, your quality bar. Framework defaults are just sensible starting points.
+**Your repo, your rules.** Override any built-in skill by dropping a markdown file in `.po-agent/skills/`. The agent adapts to your stack, your conventions, your quality bar. Framework defaults are just starting points.
 
-**Transparent by default.** Every run posts its reasoning, cost, and a link to the workflow log. No black boxes. You see exactly what the agent did, why it did it, and what it cost.
+**Transparent by default.** Every run posts its reasoning, cost, and a link to the workflow log. No black boxes. You see what the agent did, why, and what it cost.
 
-**Runs where your code runs.** No external SaaS, no third-party access to your codebase. PO Agent runs inside GitHub Actions on your own runners. Your code never leaves your CI environment.
+**Runs where your code runs.** No external SaaS. No third-party access to your codebase. PO Agent runs inside GitHub Actions on your infrastructure. Your code never leaves your CI environment.
 
-**Autonomous but interruptible.** The agent handles the full loop — implementation, CI, review, resume — without human intervention. But it stops and asks when confidence is low, scope is unclear, or a human decision is needed.
+**Autonomous but interruptible.** The agent handles the full loop — implementation, CI, review, resume — without intervention. But it stops and asks when confidence is low, scope is unclear, or a human decision is needed.
 
-**Budget-aware.** Every session tracks cost. Set a budget cap per run, and the agent will optimise its approach to stay within it. No surprise bills.
+**Budget-aware.** Every session tracks cost. Set a cap per run and the agent optimises to stay within it. No surprise bills.
 
 ---
 
-## Quick Start (2 minutes)
+## Quick Start
 
-### 1. Copy this workflow to your repo
+### 1. Add the workflow
 
 ```yaml
 # .github/workflows/po-agent.yml
@@ -61,9 +79,9 @@ jobs:
 
 ### 2. Add your API key
 
-Go to **Settings → Secrets → Actions** and add `ANTHROPIC_API_KEY`.
+**Settings → Secrets → Actions** → add `ANTHROPIC_API_KEY`.
 
-### 3. Use it
+### 3. Talk to it
 
 Comment on any PR:
 
@@ -71,33 +89,47 @@ Comment on any PR:
 @po-agent fix this failing test
 ```
 
-The agent will investigate the failure, implement a fix, push it, and wait for CI.
+The agent investigates the failure, implements a fix, pushes, and waits for CI. Done.
 
 ---
 
 ## How It Works
 
 ```
-You comment on a PR          The agent runs in GitHub Actions          You get a response
-┌──────────────────┐         ┌──────────────────────────┐            ┌──────────────────┐
-│ @po-agent fix    │────────▶│ 1. Investigate           │───────────▶│ Fixed in abc123.  │
-│ this bug         │         │ 2. Implement fix         │            │ CI passed. ✅     │
-│                  │         │ 3. Push + wait for CI    │            │                  │
-│                  │         │ 4. Handle review comments│            │ Cost: ~$0.42     │
-└──────────────────┘         └──────────────────────────┘            └──────────────────┘
+You comment on a PR           The agent runs in Actions             You get a result
+┌───────────────────┐         ┌─────────────────────────┐          ┌───────────────────┐
+│ @po-agent fix     │────────▶│  1. Investigate          │────────▶│  Fixed in abc123.  │
+│ this bug          │         │  2. Implement            │         │  CI passed. ✅     │
+│                   │         │  3. Push + wait for CI   │         │                   │
+│                   │         │  4. Handle review        │         │  Cost: ~$0.42     │
+└───────────────────┘         └─────────────────────────┘          └───────────────────┘
 ```
 
-The agent uses Claude Code with a battle-tested set of workflow skills. It thinks like a Product Owner first (understanding the user's problem) and then acts like a Senior Developer (writing clean code with tests).
+It thinks like a Product Owner first — understanding the problem — then acts like a Senior Developer — writing clean code with tests.
 
 ---
 
-## Customization
+## Skills
 
-Everything is customized through **skills** — markdown files in `.po-agent/skills/` in your repo.
+Everything is customised through **skills**: markdown files in `.po-agent/skills/`.
+
+### Built-in skills
+
+| Skill | What it does |
+|-------|-------------|
+| `/mandatory-gates` | Investigation, confidence check, scope confirmation — before any code |
+| `/bug-fix-workflow` | 9-phase bug fix: investigate → implement → CI → review → verify |
+| `/story-workflow` | 9-phase feature implementation |
+| `/code-quality` | Pre-push validation (lint, format, typecheck) |
+| `/pr-creation` | Create PRs with proper format and context |
+| `/review-handling` | Process AI and human review comments |
+| `/merge-conflicts` | Resolve conflicts via rebase |
+| `/ci-wait-resume` | Wait for CI inline or via auto-resume |
+| `/budget-management` | Session cost tracking and optimisation |
+| `/playwright-verify` | Browser verification with Playwright MCP |
+| `/rfs-proposal` | File a Request for Skill when a skill gap is detected |
 
 ### Override a built-in skill
-
-The agent ships with generic defaults for code quality, PR creation, etc. Override any of them:
 
 ```markdown
 <!-- .po-agent/skills/code-quality/SKILL.md -->
@@ -116,7 +148,9 @@ npm run lint:fix && npm run format:write && npm run typecheck
 \`\`\`
 ```
 
-### Add project-specific skills
+Your version wins. The framework default is skipped.
+
+### Add your own skills
 
 ```markdown
 <!-- .po-agent/skills/db-access/SKILL.md -->
@@ -133,47 +167,28 @@ Connect to the dev database:
 \`\`\`bash
 mysql -h $DB_HOST -u $DB_USER -p$DB_PASSWORD myapp_dev
 \`\`\`
-
-Credentials are available via environment variables (passed via `secrets` input).
 ```
 
-### Skill override priority
+### Priority
 
-| Source | Priority |
-|--------|----------|
-| Your `.po-agent/skills/code-quality/` | **Wins** (override) |
-| Framework `skills/code-quality/` | Skipped |
-| Your `.po-agent/skills/db-access/` | **Added** (extension) |
-
----
-
-## Built-in Skills
-
-| Skill | Description |
-|-------|-------------|
-| `/mandatory-gates` | Pre-implementation gates: investigation, confidence assessment, scope confirmation |
-| `/bug-fix-workflow` | 9-phase bug fix: investigate → implement → CI → review → verify |
-| `/story-workflow` | 9-phase feature implementation |
-| `/code-quality` | Pre-push validation (lint, format, typecheck) |
-| `/pr-creation` | Create PRs with proper format |
-| `/review-handling` | Process AI and human review comments |
-| `/merge-conflicts` | Resolve merge conflicts via rebase |
-| `/ci-wait-resume` | Wait for CI checks inline or via auto-resume |
-| `/budget-management` | Session cost tracking and optimization |
-| `/playwright-verify` | Browser verification with Playwright |
+| Source | What happens |
+|--------|-------------|
+| `.po-agent/skills/code-quality/` | **Overrides** the built-in |
+| `.po-agent/skills/db-access/` | **Added** as a new skill |
+| `skills/code-quality/` (built-in) | Skipped if overridden |
 
 ---
 
 ## Auto-Resume
 
-The agent can automatically resume when CI completes. Add the resume workflow:
+The agent automatically picks up where it left off when CI completes:
 
 ```yaml
 # .github/workflows/po-agent-resume.yml
 name: PO Agent Resume
 on:
   workflow_run:
-    workflows: ["CI"]    # Your CI workflow name(s)
+    workflows: ["CI"]
     types: [completed]
 jobs:
   resume:
@@ -184,40 +199,25 @@ jobs:
           github_token: ${{ github.token }}
 ```
 
----
-
-## Additional Triggers
-
-### Slack
-
-Deploy the [Slack webhook relay](webhooks/slack/) and add `repository_dispatch` to your workflow triggers:
-
-```yaml
-on:
-  issue_comment:
-    types: [created]
-  repository_dispatch:
-```
-
-Pass the Slack bot token via secrets:
-
-```yaml
-- uses: vyzn-tech/po-agent@v1
-  with:
-    anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-    secrets: |
-      SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }}
-```
-
-### Any Webhook Source
-
-The agent accepts any `repository_dispatch` event. The `client_payload` is passed through as context. See [webhooks/README.md](webhooks/README.md) for details.
+Labels track state: `po-agent:waiting-ci`, `po-agent:in-progress`, `po-agent:attempt-N`.
 
 ---
 
-## Full Workflow Example
+## Triggers
 
-For all triggers (GitHub + Slack + any webhook + manual + auto-resume):
+PO Agent works from multiple sources:
+
+| Source | How |
+|--------|-----|
+| **PR comment** | `@po-agent fix this bug` |
+| **Issue comment** | `@po-agent implement this feature` |
+| **Slack** | Deploy the [webhook relay](webhooks/slack/), mention the agent |
+| **Azure DevOps** | Deploy the [AzDo relay](webhooks/azure-devops/) |
+| **Any webhook** | Send a `repository_dispatch` with your payload |
+| **Manual** | `workflow_dispatch` with a message |
+| **Auto-resume** | Triggered automatically after CI |
+
+### Full workflow (all triggers)
 
 ```yaml
 name: PO Agent
@@ -231,15 +231,16 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  issues: write
   actions: write
 concurrency:
-  group: po-agent-${{ github.event.issue.number || github.event.client_payload.pr_number || github.event.client_payload.work_item_id || github.run_id }}
+  group: po-agent-${{ github.event.issue.number || github.event.client_payload.pr_number || github.run_id }}
   cancel-in-progress: false
 jobs:
   agent:
     if: |
       github.event_name != 'issue_comment' ||
-      (github.event.issue.pull_request && contains(github.event.comment.body, '@po-agent'))
+      contains(github.event.comment.body, '@po-agent')
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -252,74 +253,84 @@ jobs:
           max_budget_usd: '10.0'
           secrets: |
             SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }}
-            AZURE_DEVOPS_PAT=${{ secrets.AZURE_DEVOPS_PAT }}
 ```
 
 ---
 
-## Configuration Reference
+## Configuration
 
-### Action Inputs
+### Action inputs
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `anthropic_api_key` | Yes | — | Anthropic API key |
+| `anthropic_api_key` | Yes | — | Anthropic API key (or dummy if using a proxy) |
+| `anthropic_base_url` | No | — | Custom API base URL for proxies |
 | `max_budget_usd` | No | `5.0` | Max spend per session |
 | `model` | No | `claude-sonnet-4-20250514` | Claude model |
-| `trigger_word` | No | `@po-agent` | Word that triggers the agent |
-| `secrets` | No | — | Newline-separated `KEY=VALUE` pairs, exported as env vars |
-| `github_token` | No | `github.token` | GitHub token for comments/reactions |
+| `investigation_model` | No | — | Model for read-only investigation phases |
+| `implementation_model` | No | — | Model for code-writing phases |
+| `trigger_word` | No | `@po-agent` | Keyword that invokes the agent |
+| `timeout_minutes` | No | `0` | Timeout awareness for the agent |
+| `dry_run` | No | `false` | Stop after investigation, no code changes |
+| `secrets` | No | — | `KEY=VALUE` pairs, exported as env vars |
+| `github_token` | No | `github.token` | GitHub token for API calls |
 
-### Resume Action Inputs
+### Resume inputs
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `github_token` | No | `github.token` | GitHub token |
 | `max_attempts` | No | `10` | Max resume attempts per PR |
 | `required_workflows` | No | — | Comma-separated workflow names to wait for |
-| `secrets` | No | — | Newline-separated `KEY=VALUE` pairs |
 
 ---
 
 ## Architecture
 
 ```
-.po-agent/skills/          ← Your skills (overrides + extensions)
+.po-agent/skills/           ← Your skills (overrides + extensions)
     code-quality/SKILL.md
-    pr-creation/SKILL.md
     db-access/SKILL.md
 
-vyzn-tech/po-agent         ← This framework
-├── action.yml             ← Composite action (source detection, setup, run, respond)
-├── resume/action.yml      ← Resume sub-action
-├── skills/                ← Built-in default skills
-├── prompts/               ← System prompt fragments
-├── scripts/               ← Shell utilities (wait-for-checks, etc.)
-└── webhooks/              ← Webhook relay functions
+vyzn-tech/po-agent          ← This framework
+├── action.yml              ← Composite action (detect, setup, run, respond)
+├── resume/action.yml       ← Resume sub-action
+├── skills/                 ← Built-in skills
+├── prompts/                ← System prompt fragments
+├── scripts/                ← Shell utilities
+└── webhooks/               ← Webhook relay functions
 ```
 
-At runtime, the action:
-1. Reads `$GITHUB_EVENT_PATH` to detect source and extract context
-2. Links your `.po-agent/skills/` into Claude Code's skill discovery (your skills override framework defaults)
-3. Composes a system prompt from `prompts/core.md` + source-specific fragment
-4. Runs Claude Code with your `CLAUDE.md` as project context
-5. Posts the response back to the source (GitHub PR comment, Slack message, etc.)
+At runtime:
+1. Detect source from `$GITHUB_EVENT_PATH` (PR, issue, Slack, webhook, resume)
+2. Link `.po-agent/skills/` into Claude Code — your skills override defaults
+3. Compose system prompt: `core.md` + source-specific fragment + context
+4. Run Claude Code with your `CLAUDE.md` as project context
+5. Post the response back to source (PR comment, Slack message, etc.)
 
 ---
 
 ## Comparison
 
-| Feature | GitHub Copilot | Cursor | Devin | **PO Agent** |
-|---------|---------------|--------|-------|-------------|
-| Triggered from PRs | ✅ | ❌ | ❌ | ✅ |
-| Triggered from Slack | ❌ | ❌ | ❌ | ✅ |
-| Triggered from any webhook | ❌ | ❌ | ❌ | ✅ |
-| Auto-resumes after CI | ❌ | ❌ | ⚠️ | ✅ |
-| Browser verification | ❌ | ❌ | ⚠️ | ✅ (Playwright) |
-| Budget management | ❌ | ❌ | ❌ | ✅ |
-| Customizable workflows | ❌ | Limited | ❌ | ✅ (skills) |
-| Open source | ❌ | ❌ | ❌ | ✅ |
-| Runs on your own CI | ❌ | ❌ | ❌ | ✅ |
+| | Copilot Coding Agent | Cursor | Devin | **PO Agent** |
+|---|:---:|:---:|:---:|:---:|
+| Triggered from PRs | ✅ | — | — | ✅ |
+| Triggered from Slack | — | — | — | ✅ |
+| Triggered from any webhook | — | — | — | ✅ |
+| Auto-resumes after CI | — | — | partial | ✅ |
+| Browser verification | — | — | partial | ✅ |
+| Budget management | — | — | — | ✅ |
+| Customisable workflows | — | limited | — | ✅ |
+| Open source | — | — | — | ✅ |
+| Runs on your own CI | — | — | — | ✅ |
+
+---
+
+## RFS (Request for Skills)
+
+When the agent encounters a task it can't handle well, it automatically files a structured GitHub Issue proposing a new skill. These are tagged `rfs` + `rfs:proposed` and follow a standard template. See [docs/rfs.md](docs/rfs.md).
+
+**Don't add features. Add skills.** Instead of bloating the core, contributors submit skill files that teach the agent new workflows.
 
 ---
 
@@ -327,7 +338,7 @@ At runtime, the action:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Skills contributions are especially welcome! If you've written a useful skill, please submit a PR.
+Skills contributions are especially welcome. If you've built a useful skill, submit a PR.
 
 ---
 
