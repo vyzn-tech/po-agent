@@ -124,7 +124,23 @@ runs:
         echo "::notice::Skipping — bot message detected (prevents infinite loops)"
         exit 0
 
-    # ── 2. Acknowledge receipt ──────────────────────────────────────────
+    # ── 2. Export secrets early (needed by acknowledge steps) ───────────
+    - name: Export secrets
+      if: steps.source.outputs.skip != 'true'
+      shell: bash
+      env:
+        SECRETS_INPUT: ${{ inputs.secrets }}
+      run: |
+        if [ -n "$SECRETS_INPUT" ]; then
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            [[ "$line" == \#* ]] && continue
+            echo "$line" >> "$GITHUB_ENV"
+          done <<< "$SECRETS_INPUT"
+          echo "Exported secrets to environment"
+        fi
+
+    # ── 3. Acknowledge receipt ──────────────────────────────────────────
     - name: Acknowledge on GitHub
       if: steps.source.outputs.source == 'github' && steps.source.outputs.skip != 'true'
       uses: actions/github-script@v7
@@ -196,11 +212,11 @@ runs:
         # 3. Set po-agent:in-progress tag
         CURRENT_TAGS=$(curl -sf \
           "${AZDO_URL}?fields=System.Tags&api-version=7.0" \
-          -H "Authorization: Basic $AUTH" | jq -r '.fields["System.Tags"] // ""')
+          -H "Authorization: Basic $AUTH" 2>/dev/null | jq -r '.fields["System.Tags"] // ""' 2>/dev/null || echo "")
 
         # Strip existing po-agent status tags
         NEW_TAGS=$(echo "$CURRENT_TAGS" | tr ';' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
-          grep -vE '^po-agent:(in-progress|waiting-ci|waiting-human|done|failed)$' | \
+          { grep -vE '^po-agent:(in-progress|waiting-ci|waiting-human|done|failed)$' || true; } | \
           tr '\n' ';' | sed 's/;$//')
 
         # Add in-progress tag and attempt-1 if no attempt tag exists
@@ -353,22 +369,6 @@ runs:
             sudo ln -sf "$script" "/usr/local/bin/$name"
             echo "SCRIPT: $name"
           done
-        fi
-
-    # ── 7. Export secrets as environment variables ──────────────────────
-    - name: Export secrets
-      if: steps.source.outputs.skip != 'true'
-      shell: bash
-      env:
-        SECRETS_INPUT: ${{ inputs.secrets }}
-      run: |
-        if [ -n "$SECRETS_INPUT" ]; then
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            [[ "$line" == \#* ]] && continue
-            echo "$line" >> "$GITHUB_ENV"
-          done <<< "$SECRETS_INPUT"
-          echo "Exported secrets to environment"
         fi
 
     # ── 8. Fetch context ────────────────────────────────────────────────
@@ -951,10 +951,10 @@ runs:
         # Update tags on work item
         CURRENT_TAGS=$(curl -sf \
           "${AZDO_URL}?fields=System.Tags&api-version=7.0" \
-          -H "Authorization: Basic $AUTH" | jq -r '.fields["System.Tags"] // ""')
+          -H "Authorization: Basic $AUTH" 2>/dev/null | jq -r '.fields["System.Tags"] // ""' 2>/dev/null || echo "")
 
         NEW_TAGS=$(echo "$CURRENT_TAGS" | tr ';' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
-          grep -vE '^po-agent:(in-progress|waiting-ci|waiting-human|done|failed)$' | \
+          { grep -vE '^po-agent:(in-progress|waiting-ci|waiting-human|done|failed)$' || true; } | \
           tr '\n' ';' | sed 's/;$//')
         NEW_TAGS="${NEW_TAGS:+$NEW_TAGS; }po-agent:$NEW_STATUS"
 
@@ -1070,9 +1070,9 @@ runs:
 
               # Set failed tag
               CURRENT_TAGS=$(curl -sf "${AZDO_URL}?fields=System.Tags&api-version=7.0" \
-                -H "Authorization: Basic $AUTH" | jq -r '.fields["System.Tags"] // ""')
+                -H "Authorization: Basic $AUTH" 2>/dev/null | jq -r '.fields["System.Tags"] // ""' 2>/dev/null || echo "")
               NEW_TAGS=$(echo "$CURRENT_TAGS" | tr ';' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
-                grep -vE '^po-agent:(in-progress|waiting-ci|waiting-human|done|failed)$' | \
+                { grep -vE '^po-agent:(in-progress|waiting-ci|waiting-human|done|failed)$' || true; } | \
                 tr '\n' ';' | sed 's/;$//')
               NEW_TAGS="${NEW_TAGS:+$NEW_TAGS; }po-agent:failed"
               curl -sf -X PATCH "${AZDO_URL}?api-version=7.0" \
