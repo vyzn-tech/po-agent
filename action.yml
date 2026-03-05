@@ -189,7 +189,8 @@ runs:
           exit 0
         fi
 
-        AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZURE_DEVOPS_PROJECT/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
+        AZDO_PROJECT_ENCODED=$(echo "$AZURE_DEVOPS_PROJECT" | sed 's/ /%20/g')
+        AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZDO_PROJECT_ENCODED/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
         AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
         WORKFLOW_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
@@ -397,7 +398,8 @@ runs:
           fi
 
           local AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
-          local AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZURE_DEVOPS_PROJECT/_apis/wit/workitems/$WI_ID"
+          local AZDO_PROJECT_ENCODED=$(echo "$AZURE_DEVOPS_PROJECT" | sed 's/ /%20/g')
+          local AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZDO_PROJECT_ENCODED/_apis/wit/workitems/$WI_ID"
 
           local WI=$(curl -sf "${AZDO_URL}?\$expand=relations&api-version=7.0" \
             -H "Authorization: Basic $AUTH" 2>/dev/null || echo "{}")
@@ -898,7 +900,8 @@ runs:
         fi
 
         AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
-        AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZURE_DEVOPS_PROJECT/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
+        AZDO_PROJECT_ENCODED=$(echo "$AZURE_DEVOPS_PROJECT" | sed 's/ /%20/g')
+        AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZDO_PROJECT_ENCODED/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
         WORKFLOW_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
 
         # Read response
@@ -1060,7 +1063,8 @@ runs:
           azure-devops)
             if [ -n "$AZURE_DEVOPS_PAT" ] && [ -n "$AZURE_DEVOPS_ORG" ] && [ -n "$AZDO_WORK_ITEM_ID" ]; then
               AUTH=$(printf ':'"$AZURE_DEVOPS_PAT" | base64)
-              AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZURE_DEVOPS_PROJECT/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
+              AZDO_PROJECT_ENCODED=$(echo "$AZURE_DEVOPS_PROJECT" | sed 's/ /%20/g')
+              AZDO_URL="https://dev.azure.com/$AZURE_DEVOPS_ORG/$AZDO_PROJECT_ENCODED/_apis/wit/workitems/$AZDO_WORK_ITEM_ID"
               CANCEL_HTML="<p>⚠️ <strong>PO Agent run was cancelled.</strong></p><p><a href=\"https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID\">workflow run</a></p>"
               curl -sf --http1.1 -X POST \
                 "${AZDO_URL}/comments?api-version=7.1-preview.4" \
