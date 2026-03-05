@@ -204,11 +204,21 @@ runs:
 
         # 2. Post "Starting work..." comment
         COMMENT_BODY="<p>🤖 <strong>Starting work...</strong></p><p>Follow progress: <a href=\"${WORKFLOW_URL}\">workflow run</a></p>"
-        curl -sf --http1.1 -X POST \
+        echo "::warning::DEBUG AUTH_B64=[${AUTH}]"
+        echo "::warning::DEBUG AUTH_LEN=$(echo -n "$AUTH" | wc -c | tr -d ' ')"
+        echo "::warning::DEBUG AUTH_CHARS=$(echo -n "$AUTH" | xxd -p | tail -c 20)"
+        HTTP_CODE=$(curl -s --http1.1 -o /tmp/azdo_resp.txt -w "%{http_code}" -X POST \
           "${AZDO_URL}/comments?api-version=7.1-preview.4" \
-          -H "Authorization: Basic $AUTH" \
+          -H "Authorization: Basic ${AUTH}" \
           -H "Content-Type: application/json" \
-          -d "{\"text\": \"$COMMENT_BODY\"}" > /dev/null 2>&1 || echo "::warning::Failed to post AzDo comment"
+          -d "{\"text\": \"$COMMENT_BODY\"}" 2>/tmp/azdo_err.txt)
+        echo "::warning::DEBUG HTTP_CODE=${HTTP_CODE}"
+        echo "::warning::DEBUG RESP=$(cat /tmp/azdo_resp.txt 2>/dev/null | head -c 300)"
+        if [ "$HTTP_CODE" != "200" ] && [ "$HTTP_CODE" != "201" ]; then
+          echo "::warning::Failed to post AzDo comment (HTTP $HTTP_CODE)"
+        else
+          echo "::notice::Successfully posted AzDo comment (HTTP $HTTP_CODE)"
+        fi
 
         # 3. Set po-agent:in-progress tag
         CURRENT_TAGS=$(curl -sf \
