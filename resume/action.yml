@@ -1,49 +1,25 @@
 name: 'PO Agent Resume'
-description: 'Checks if CI/preview workflows completed and dispatches a resume event to the PO Agent.'
+description: 'Checks if CI/preview workflows completed and dispatches a resume event to the PO Agent. Delegates state checking to a repo-provided gate script.'
 
 inputs:
   github_token:
     description: 'GitHub token'
     default: ${{ github.token }}
-  max_attempts:
-    description: 'Maximum resume attempts per PR'
-    default: '10'
   required_workflows:
     description: 'Comma-separated list of required workflow names to wait for'
     default: ''
   optional_workflows:
     description: 'Comma-separated list of optional workflow names (only waited on if triggered)'
     default: ''
-  work_item_id:
-    description: 'Azure DevOps work item ID to pass through in the dispatch payload (for AzDo integration)'
-    default: ''
-  secrets:
-    description: 'Newline-separated KEY=VALUE pairs for integration-specific state tracking (passed to skills).'
-    default: ''
 
 runs:
   using: 'composite'
   steps:
-    - name: Export secrets
-      shell: bash
-      env:
-        SECRETS_INPUT: ${{ inputs.secrets }}
-      run: |
-        if [ -n "$SECRETS_INPUT" ]; then
-          while IFS= read -r line; do
-            [ -z "$line" ] && continue
-            [[ "$line" == \#* ]] && continue
-            echo "$line" >> "$GITHUB_ENV"
-          done <<< "$SECRETS_INPUT"
-        fi
-
     - name: Check workflows and resume
       uses: actions/github-script@v7
       env:
-        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         REQUIRED_WORKFLOWS: ${{ inputs.required_workflows }}
         OPTIONAL_WORKFLOWS: ${{ inputs.optional_workflows }}
-        WORK_ITEM_ID: ${{ inputs.work_item_id }}
       with:
         github-token: ${{ inputs.github_token }}
         script: |
@@ -59,7 +35,67 @@ runs:
           const pr = prs[0];
           console.log(`PR #${pr.number}`);
 
-          // Check if this PR has a po-agent label indicating it's waiting
+          // Checkout repo to access gate script
+          const { execSync } = require('child_process');
+
+          // Check if gate script exists in the repo
+          let gateScriptPath;
+          try {
+            // We need the repo checked out to access the script
+            execSync(`git clone --depth 1 --single-branch --branch ${workflowRun.head_branch} https://x-access-token:${process.env.GITHUB_TOKEN}@github.com/${context.repo.owner}/${context.repo.repo}.git /tmp/repo-checkout 2>/dev/null`);
+            gateScriptPath = '/tmp/repo-checkout/.po-agent/scripts/is-waiting.sh';
+
+            const fs = require('fs');
+            if (!fs.existsSync(gateScriptPath)) {
+              console.log('No .po-agent/scripts/is-waiting.sh found — skipping');
+              return;
+            }
+            // Ensure executable
+            fs.chmodSync(gateScriptPath, 0o755);
+          } catch (e) {
+            console.log(`Failed to checkout repo for gate script: ${e.message}`);
+            return;
+          }
+
+          // Also make azdo-tags.sh executable if it exists
+          const fs = require('fs');
+          const azdoTagsPath = '/tmp/repo-checkout/.po-agent/scripts/azdo-tags.sh';
+          if (fs.existsSync(azdoTagsPath)) {
+            fs.chmodSync(azdoTagsPath, 0o755);
+          }
+
+          // Call gate script: exit 0 = waiting, non-zero = skip
+          let gateOutput;
+          try {
+            gateOutput = execSync(`${gateScriptPath} ${pr.number}`, {
+              env: {
+                ...process.env,
+                PATH: `/tmp/repo-checkout/.po-agent/scripts:${process.env.PATH}`,
+                GH_TOKEN: process.env.GITHUB_TOKEN
+              },
+              encoding: 'utf-8',
+              timeout: 30000
+            }).trim();
+          } catch (e) {
+            console.log(`Gate script exited non-zero — PR is not waiting: ${e.stderr || e.message}`);
+            return;
+          }
+
+          // Parse optional JSON metadata from gate stdout
+          let workItemId = '';
+          let currentAttempt = 0;
+          if (gateOutput) {
+            try {
+              const meta = JSON.parse(gateOutput);
+              workItemId = meta.work_item_id || '';
+              currentAttempt = meta.attempt || 0;
+              console.log(`Gate metadata: work_item_id=${workItemId}, attempt=${currentAttempt}`);
+            } catch {
+              console.log(`Gate stdout (not JSON): ${gateOutput}`);
+            }
+          }
+
+          // Get PR head SHA for workflow checks
           const { data: prData } = await github.rest.pulls.get({
             owner: context.repo.owner,
             repo: context.repo.repo,
@@ -67,40 +103,7 @@ runs:
           });
           const headSha = prData.head.sha;
 
-          const labels = prData.labels.map(l => l.name);
-          const isWaiting = labels.includes('po-agent:waiting-ci');
-          if (!isWaiting) {
-            console.log('PR does not have po-agent:waiting-ci label — skipping');
-            return;
-          }
-
-          // Get attempt count from labels
-          const attemptLabel = labels.find(l => l.startsWith('po-agent:attempt-'));
-          const currentAttempt = attemptLabel ? parseInt(attemptLabel.replace('po-agent:attempt-', ''), 10) : 0;
-          const maxAttempts = parseInt(process.env.MAX_ATTEMPTS || '10', 10);
-
-          if (currentAttempt >= maxAttempts) {
-            console.log(`Max ${maxAttempts} attempts reached — stopping`);
-            // Remove waiting label, add failed
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: pr.number, name: 'po-agent:waiting-ci'
-              });
-            } catch {}
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: pr.number, labels: ['po-agent:failed']
-            });
-            await github.rest.issues.createComment({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: pr.number,
-              body: `⚠️ **PO Agent stopped after ${maxAttempts} attempts.** Please review and re-trigger manually if needed.`
-            });
-            return;
-          }
-
-          // Check required workflows
+          // Check required/optional workflows
           const { data: workflows } = await github.rest.actions.listRepoWorkflows({
             owner: context.repo.owner, repo: context.repo.repo
           });
@@ -153,54 +156,25 @@ runs:
           }
 
           // All done — dispatch resume
-          const nextAttempt = currentAttempt + 1;
           const overallResult = anyFailed ? 'failure' : 'success';
           const summary = Object.entries(statuses).map(([n, s]) => `${n}: ${s}`).join(', ');
 
-          // Update labels
-          if (attemptLabel) {
-            try {
-              await github.rest.issues.removeLabel({
-                owner: context.repo.owner, repo: context.repo.repo,
-                issue_number: pr.number, name: attemptLabel
-              });
-            } catch {}
-          }
-          try {
-            await github.rest.issues.removeLabel({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: pr.number, name: 'po-agent:waiting-ci'
-            });
-          } catch {}
-          await github.rest.issues.addLabels({
-            owner: context.repo.owner, repo: context.repo.repo,
-            issue_number: pr.number,
-            labels: ['po-agent:in-progress', `po-agent:attempt-${nextAttempt}`]
-          });
-
-          // Dispatch resume event
-          console.log(`Dispatching resume for PR #${pr.number} (attempt ${nextAttempt}, result: ${overallResult})`);
           const payload = {
             pr_number: pr.number,
             trigger_workflow: workflowRun.name,
             trigger_result: overallResult,
-            workflow_summary: summary,
-            attempt: nextAttempt
+            workflow_summary: summary
           };
 
-          // Pass through work_item_id for AzDo integration
-          // Priority: explicit input > detected from PR title
-          let workItemId = process.env.WORK_ITEM_ID;
-          if (!workItemId) {
-            // Try to detect from PR title (VYZN-1234 or AB#1234)
-            const titleMatch = prData.title?.match(/(?:AB#|VYZN-)(\d+)/);
-            if (titleMatch) workItemId = titleMatch[1];
-          }
           if (workItemId) {
             payload.work_item_id = workItemId;
             console.log(`Including work_item_id: ${workItemId}`);
           }
+          if (currentAttempt) {
+            payload.attempt = currentAttempt;
+          }
 
+          console.log(`Dispatching resume for PR #${pr.number} (result: ${overallResult})`);
           await github.rest.repos.createDispatchEvent({
             owner: context.repo.owner,
             repo: context.repo.repo,
